@@ -1,341 +1,211 @@
-import { logger } from '@/utils/logger';
+import logger from '../../utils/logger';
+import { AuthConfig, AuthResponse, UserCredentials } from '../../types';
+import { validatePassword, generateSalt, hashPassword } from '../../utils/crypto';
 import { TokenManager } from './token-manager';
 import { SessionManager } from './session-manager';
-import { SecurityAuditLogger } from './security-audit-logger';
-import {
-  AuthConfig,
-  UserCredentials,
-  AuthResponse,
-  UserRole,
-  MFAConfig,
-  AuthEvent,
-} from '@/types';
-import { validatePassword, generateSalt, hashPassword } from '@/utils/crypto';
-import { ApiService } from './api.service';
+import { SecurityAuditLogger } from '../security-audit-logger';
+import { ApiService } from '../api.service';
 
 export class AuthenticationService extends ApiService {
   private tokenManager: TokenManager;
   private sessionManager: SessionManager;
   private auditLogger: SecurityAuditLogger;
-  private mfaConfig: MFAConfig;
-  private rateLimiter: RateLimiter;
+  private failedAttempts: Map<string, { count: number; lastAttempt: Date }>;
+  private readonly MAX_FAILED_ATTEMPTS = 5;
+  private readonly LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
 
   constructor(config: AuthConfig) {
     super({
       baseURL: config.apiUrl,
-      timeout: config.timeout || 30000,
+      timeout: config.timeout,
+      retries: 3,
+      retryDelay: 1000
     });
 
     this.tokenManager = new TokenManager(config.jwt);
     this.sessionManager = new SessionManager(config.session);
     this.auditLogger = new SecurityAuditLogger(config.audit);
-    this.mfaConfig = config.mfa || { enabled: false };
-    this.rateLimiter = new RateLimiter({
-      windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 5 // limit each IP to 5 failed attempts per windowMs
-    });
-
-    logger.info('AuthenticationService initialized', {
-      mfaEnabled: this.mfaConfig.enabled,
-    });
+    this.failedAttempts = new Map();
   }
 
-  /**
-   * Authenticate user credentials
-   */
-  public async authenticate(credentials: UserCredentials): Promise<AuthResponse> {
+  async login(credentials: UserCredentials): Promise<AuthResponse> {
     try {
-      // Check rate limiting
-      if (!await this.rateLimiter.checkLimit(credentials.ip)) {
-        throw new Error('Too many login attempts. Please try again later.');
-      }
+      await this.checkFailedAttempts(credentials);
 
-      // Validate input
-      this.validateCredentials(credentials);
-
-      // Log authentication attempt
-      await this.auditLogger.logEvent({
-        type: 'AUTH_ATTEMPT',
-        userId: credentials.email,
-        timestamp: new Date().toISOString(),
-        metadata: {
-          ip: credentials.ip,
-          userAgent: credentials.userAgent,
-        },
+      const response = await this.post<{ user: any; hash: string }>('/auth/verify', {
+        username: credentials.username
       });
 
-      // Authenticate against API
-      const response = await this.post<AuthResponse>('/auth/login', credentials);
-
-      // Validate password
-      const isValid = await validatePassword(
-        credentials.password,
-        response.user.passwordHash,
-        response.user.salt
-      );
+      const { user, hash } = response.data;
+      const isValid = await validatePassword(credentials.password, hash);
 
       if (!isValid) {
+        await this.handleFailedAttempt(credentials);
         throw new Error('Invalid credentials');
       }
 
-      // Check if MFA is required
-      if (this.mfaConfig.enabled && response.user.mfaEnabled) {
-        return {
-          ...response,
-          requiresMFA: true,
-          mfaToken: await this.tokenManager.createMFAToken(response.user.id),
-        };
-      }
+      await this.resetFailedAttempts(credentials);
 
-      // Create session
-      const session = await this.sessionManager.createSession({
-        userId: response.user.id,
+      const [accessToken, refreshToken] = await Promise.all([
+        this.tokenManager.generateAccessToken(user.id, user.roles),
+        this.tokenManager.generateRefreshToken(user.id)
+      ]);
+
+      const session = await this.sessionManager.createSession(user.id, {
+        userId: user.id,
         ip: credentials.ip,
-        userAgent: credentials.userAgent,
+        userAgent: credentials.userAgent
       });
 
-      // Generate tokens
-      const tokens = await this.tokenManager.generateTokens(
-        response.user.id,
-        response.user.roles
-      );
-
-      // Log successful authentication
       await this.auditLogger.logEvent({
-        type: 'AUTH_SUCCESS',
-        userId: response.user.id,
-        timestamp: new Date().toISOString(),
-        metadata: {
-          sessionId: session.id,
-          ip: credentials.ip,
-        },
+        type: 'auth.login',
+        level: 'info',
+        userId: user.id,
+        sessionId: session.id,
+        message: 'User logged in successfully'
       });
 
       return {
-        user: response.user,
-        session: session,
-        tokens: tokens,
-        requiresMFA: false,
+        token: accessToken,
+        refreshToken,
+        expiresIn: 3600,
+        session
       };
     } catch (error) {
-      // Log authentication failure
-      await this.auditLogger.logEvent({
-        type: 'AUTH_FAILURE',
-        userId: credentials.email,
-        timestamp: new Date().toISOString(),
-        metadata: {
-          error: error instanceof Error ? error.message : 'Unknown error',
-          ip: credentials.ip,
-        },
-      });
-
-      logger.error('Authentication failed', {
-        error,
-        email: credentials.email,
-      });
-
+      logger.error('Login failed:', error);
       throw error;
     }
   }
 
-  /**
-   * Verify MFA token
-   */
-  public async verifyMFA(
-    mfaToken: string,
-    code: string
-  ): Promise<AuthResponse> {
+  async register(credentials: UserCredentials): Promise<AuthResponse> {
     try {
-      // Verify MFA token
-      const payload = await this.tokenManager.verifyMFAToken(mfaToken);
-
-      // Verify MFA code
-      const response = await this.post<AuthResponse>('/auth/mfa/verify', {
-        userId: payload.userId,
-        code,
-      });
-
-      // Create session
-      const session = await this.sessionManager.createSession({
-        userId: payload.userId,
-        ip: payload.ip,
-        userAgent: payload.userAgent,
-      });
-
-      // Generate tokens
-      const tokens = await this.tokenManager.generateTokens(
-        payload.userId,
-        response.user.roles
-      );
-
-      // Log MFA verification
-      await this.auditLogger.logEvent({
-        type: 'MFA_SUCCESS',
-        userId: payload.userId,
-        timestamp: new Date().toISOString(),
-        metadata: {
-          sessionId: session.id,
-          ip: payload.ip,
-        },
-      });
-
-      return {
-        user: response.user,
-        session: session,
-        tokens: tokens,
-        requiresMFA: false,
-      };
-    } catch (error) {
-      // Log MFA failure
-      await this.auditLogger.logEvent({
-        type: 'MFA_FAILURE',
-        userId: 'unknown',
-        timestamp: new Date().toISOString(),
-        metadata: {
-          error: error instanceof Error ? error.message : 'Unknown error',
-        },
-      });
-
-      logger.error('MFA verification failed', { error });
-      throw error;
-    }
-  }
-
-  /**
-   * Register new user
-   */
-  public async register(credentials: UserCredentials): Promise<AuthResponse> {
-    try {
-      // Validate input
-      this.validateCredentials(credentials);
-
-      // Generate password hash
       const salt = await generateSalt();
-      const passwordHash = await hashPassword(credentials.password, salt);
+      const hash = await hashPassword(credentials.password);
 
-      // Create user
-      const response = await this.post<AuthResponse>('/auth/register', {
-        ...credentials,
-        passwordHash,
-        salt,
+      const response = await this.post<{ user: any }>('/auth/register', {
+        username: credentials.username,
+        hash
       });
 
-      // Create session
-      const session = await this.sessionManager.createSession({
-        userId: response.user.id,
+      const { user } = response.data;
+
+      const [accessToken, refreshToken] = await Promise.all([
+        this.tokenManager.generateAccessToken(user.id, ['user']),
+        this.tokenManager.generateRefreshToken(user.id)
+      ]);
+
+      const session = await this.sessionManager.createSession(user.id, {
+        userId: user.id,
         ip: credentials.ip,
-        userAgent: credentials.userAgent,
+        userAgent: credentials.userAgent
       });
 
-      // Generate tokens
-      const tokens = await this.tokenManager.generateTokens(
-        response.user.id,
-        response.user.roles
-      );
-
-      // Log registration
       await this.auditLogger.logEvent({
-        type: 'USER_REGISTERED',
-        userId: response.user.id,
-        timestamp: new Date().toISOString(),
-        metadata: {
-          ip: credentials.ip,
-          email: credentials.email,
-        },
+        type: 'auth.register',
+        level: 'info',
+        userId: user.id,
+        sessionId: session.id,
+        message: 'New user registered'
       });
 
       return {
-        user: response.user,
-        session: session,
-        tokens: tokens,
-        requiresMFA: false,
+        token: accessToken,
+        refreshToken,
+        expiresIn: 3600,
+        session
       };
     } catch (error) {
-      logger.error('Registration failed', {
-        error,
-        email: credentials.email,
-      });
+      logger.error('Registration failed:', error);
       throw error;
     }
   }
 
-  /**
-   * Validate user credentials
-   */
-  private validateCredentials(credentials: UserCredentials): void {
-    if (!credentials.email || !credentials.password) {
-      throw new Error('Email and password are required');
-    }
-
-    if (!this.isValidEmail(credentials.email)) {
-      throw new Error('Invalid email format');
-    }
-
-    if (!this.isValidPassword(credentials.password)) {
-      throw new Error('Password must be at least 8 characters');
-    }
-  }
-
-  /**
-   * Validate email format
-   */
-  private isValidEmail(email: string): boolean {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    return emailRegex.test(email);
-  }
-
-  /**
-   * Validate password strength
-   */
-  private isValidPassword(password: string): boolean {
-    const passwordRegex = /^[A-Za-z\d]{8,}$/;
-    return passwordRegex.test(password);
-  }
-
-  /**
-   * Get user roles
-   */
-  public async getUserRoles(userId: string): Promise<UserRole[]> {
+  async refreshToken(refreshToken: string): Promise<AuthResponse> {
     try {
-      const response = await this.get<{ roles: UserRole[] }>(
-        `/users/${userId}/roles`
-      );
-      return response.roles;
+      const userId = await this.tokenManager.verifyRefreshToken(refreshToken);
+      
+      const response = await this.get<{ user: any }>(`/users/${userId}`);
+      const { user } = response.data;
+
+      const [newAccessToken, newRefreshToken] = await Promise.all([
+        this.tokenManager.generateAccessToken(user.id, user.roles),
+        this.tokenManager.generateRefreshToken(user.id)
+      ]);
+
+      await this.tokenManager.revokeRefreshToken(refreshToken);
+
+      return {
+        token: newAccessToken,
+        refreshToken: newRefreshToken,
+        expiresIn: 3600
+      };
     } catch (error) {
-      logger.error('Failed to get user roles', { error, userId });
+      logger.error('Token refresh failed:', error);
       throw error;
     }
   }
 
-  /**
-   * Refresh access token
-   */
-  public async refreshToken(refreshToken: string): Promise<{
-    accessToken: string;
-    refreshToken: string;
-  }> {
+  async logout(sessionId: string): Promise<void> {
     try {
-      return await this.tokenManager.refreshTokens(refreshToken);
+      const session = await this.sessionManager.getSession(sessionId);
+      
+      if (session) {
+        await Promise.all([
+          this.sessionManager.endSession(sessionId),
+          this.auditLogger.logEvent({
+            type: 'auth.logout',
+            level: 'info',
+            userId: session.metadata.userId,
+            sessionId,
+            message: 'User logged out'
+          })
+        ]);
+      }
     } catch (error) {
-      logger.error('Token refresh failed', { error });
+      logger.error('Logout failed:', error);
       throw error;
     }
   }
 
-  /**
-   * Logout user
-   */
-  public async logout(sessionId: string): Promise<void> {
-    try {
-      await this.sessionManager.endSession(sessionId);
-      await this.auditLogger.logEvent({
-        type: 'USER_LOGOUT',
-        userId: 'session:' + sessionId,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      logger.error('Logout failed', { error, sessionId });
-      throw error;
+  private async checkFailedAttempts(credentials: UserCredentials): Promise<void> {
+    const attempts = this.failedAttempts.get(credentials.username);
+    
+    if (!attempts) {
+      return;
     }
+
+    if (attempts.count >= this.MAX_FAILED_ATTEMPTS) {
+      const timeSinceLastAttempt = Date.now() - attempts.lastAttempt.getTime();
+      
+      if (timeSinceLastAttempt < this.LOCKOUT_DURATION) {
+        const remainingLockout = Math.ceil((this.LOCKOUT_DURATION - timeSinceLastAttempt) / 1000 / 60);
+        throw new Error(`Account is locked. Try again in ${remainingLockout} minutes`);
+      } else {
+        this.failedAttempts.delete(credentials.username);
+      }
+    }
+  }
+
+  private async handleFailedAttempt(credentials: UserCredentials): Promise<void> {
+    const attempts = this.failedAttempts.get(credentials.username) || { count: 0, lastAttempt: new Date() };
+    
+    attempts.count++;
+    attempts.lastAttempt = new Date();
+    
+    this.failedAttempts.set(credentials.username, attempts);
+
+    await this.auditLogger.logEvent({
+      type: 'auth.login.failed',
+      level: attempts.count >= this.MAX_FAILED_ATTEMPTS ? 'critical' : 'warning',
+      message: `Failed login attempt for user ${credentials.username}`,
+      metadata: {
+        ip: credentials.ip,
+        attemptCount: attempts.count
+      }
+    });
+  }
+
+  private async resetFailedAttempts(credentials: UserCredentials): Promise<void> {
+    this.failedAttempts.delete(credentials.username);
   }
 }

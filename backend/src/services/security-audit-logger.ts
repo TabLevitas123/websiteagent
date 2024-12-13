@@ -1,346 +1,186 @@
-import { logger } from '@/utils/logger';
-import {
-  AuditConfig,
-  AuditEvent,
-  AuditLevel,
-  AuditFilter,
-  SecurityEvent,
-  AuditMetrics
-} from '@/types';
-import { createHash } from 'crypto';
+import logger from '../utils/logger';
+import { AuditConfig, AuditEvent, AuditLevel, AuditMetrics } from '../types';
+import { hashData } from '../utils/crypto';
 
 export class SecurityAuditLogger {
-  private config: AuditConfig;
   private events: AuditEvent[] = [];
-  private alertCallbacks: ((event: AuditEvent) => void)[] = [];
-  private retentionDays: number;
+  private config: AuditConfig;
 
   constructor(config: AuditConfig) {
     this.config = {
-      logLevel: config.logLevel || 'info',
-      retentionPeriod: config.retentionPeriod || 365, // days
-      maxEvents: config.maxEvents || 1000000,
-      alertThresholds: config.alertThresholds || {
-        failedLogins: 5,
-        suspiciousActivities: 3,
-        criticalEvents: 1,
-      },
-      ...config,
+      logLevel: config.logLevel,
+      retentionPeriod: config.retentionPeriod,
+      maxEvents: config.maxEvents,
+      alertThresholds: {
+        warning: config.alertThresholds.warning,
+        critical: config.alertThresholds.critical
+      }
     };
 
-    this.retentionDays = this.config.retentionPeriod;
-    this.startCleanupInterval();
-
-    logger.info('SecurityAuditLogger initialized', {
-      logLevel: this.config.logLevel,
-      retentionDays: this.retentionDays,
-    });
+    this.startPeriodicCleanup();
   }
 
-  /**
-   * Log security event
-   */
-  public async logEvent(event: SecurityEvent): Promise<void> {
-    try {
-      const auditEvent: AuditEvent = {
-        id: this.generateEventId(),
+  async logEvent(event: Partial<AuditEvent>): Promise<void> {
+    const now = new Date();
+    const fullEvent: AuditEvent = {
+      id: this.generateEventId(),
+      timestamp: now,
+      level: event.level || 'info',
+      type: event.type || 'unknown',
+      userId: event.userId,
+      sessionId: event.sessionId,
+      message: event.message || '',
+      metadata: event.metadata,
+      hash: this.generateEventHash({
         ...event,
-        timestamp: event.timestamp || new Date().toISOString(),
-        level: this.determineEventLevel(event),
-        metadata: {
-          ...event.metadata,
-          sourceIp: event.metadata?.ip,
-          userAgent: event.metadata?.userAgent,
-        },
-        hash: '',
-      };
-
-      // Generate event hash for integrity verification
-      auditEvent.hash = this.generateEventHash(auditEvent);
-
-      // Store event
-      this.events.push(auditEvent);
-
-      // Check alert thresholds
-      this.checkAlertThresholds(auditEvent);
-
-      // Log to system logger
-      logger.info('Security event logged', {
-        eventId: auditEvent.id,
-        type: auditEvent.type,
-        level: auditEvent.level,
-      });
-
-      // Enforce event limit
-      if (this.events.length > this.config.maxEvents) {
-        this.events = this.events.slice(-this.config.maxEvents);
-      }
-    } catch (error) {
-      logger.error('Failed to log security event', { error, event });
-      throw error;
-    }
-  }
-
-  /**
-   * Get audit events with filtering
-   */
-  public async getEvents(filter?: AuditFilter): Promise<AuditEvent[]> {
-    try {
-      let filteredEvents = [...this.events];
-
-      if (filter) {
-        if (filter.startDate) {
-          filteredEvents = filteredEvents.filter(event =>
-            new Date(event.timestamp) >= new Date(filter.startDate!)
-          );
-        }
-
-        if (filter.endDate) {
-          filteredEvents = filteredEvents.filter(event =>
-            new Date(event.timestamp) <= new Date(filter.endDate!)
-          );
-        }
-
-        if (filter.level) {
-          filteredEvents = filteredEvents.filter(event =>
-            event.level === filter.level
-          );
-        }
-
-        if (filter.type) {
-          filteredEvents = filteredEvents.filter(event =>
-            event.type === filter.type
-          );
-        }
-
-        if (filter.userId) {
-          filteredEvents = filteredEvents.filter(event =>
-            event.userId === filter.userId
-          );
-        }
-      }
-
-      return filteredEvents;
-    } catch (error) {
-      logger.error('Failed to get audit events', { error, filter });
-      throw error;
-    }
-  }
-
-  /**
-   * Register alert callback
-   */
-  public onAlert(callback: (event: AuditEvent) => void): void {
-    this.alertCallbacks.push(callback);
-  }
-
-  /**
-   * Generate unique event ID
-   */
-  private generateEventId(): string {
-    return createHash('sha256')
-      .update(Date.now().toString() + Math.random().toString())
-      .digest('hex')
-      .substring(0, 16);
-  }
-
-  /**
-   * Generate event hash for integrity verification
-   */
-  private generateEventHash(event: AuditEvent): string {
-    const { hash, ...eventWithoutHash } = event;
-    return createHash('sha256')
-      .update(JSON.stringify(eventWithoutHash))
-      .digest('hex');
-  }
-
-  /**
-   * Determine event severity level
-   */
-  private determineEventLevel(event: SecurityEvent): AuditLevel {
-    const criticalEvents = [
-      'AUTH_BREACH_ATTEMPT',
-      'PRIVILEGE_ESCALATION',
-      'SUSPICIOUS_ACTIVITY',
-      'DATA_BREACH',
-    ];
-
-    const warningEvents = [
-      'AUTH_FAILURE',
-      'INVALID_TOKEN',
-      'SESSION_HIJACK_ATTEMPT',
-      'RATE_LIMIT_EXCEEDED',
-    ];
-
-    if (criticalEvents.includes(event.type)) {
-      return 'critical';
-    }
-
-    if (warningEvents.includes(event.type)) {
-      return 'warning';
-    }
-
-    return 'info';
-  }
-
-  /**
-   * Check alert thresholds
-   */
-  private checkAlertThresholds(event: AuditEvent): void {
-    const recentEvents = this.getRecentEvents(event.userId, 300000); // 5 minutes
-
-    // Check failed login attempts
-    if (event.type === 'AUTH_FAILURE') {
-      const failedLogins = recentEvents.filter(e => e.type === 'AUTH_FAILURE');
-      if (failedLogins.length >= this.config.alertThresholds.failedLogins) {
-        this.triggerAlert({
-          ...event,
-          type: 'EXCESSIVE_AUTH_FAILURES',
-          level: 'critical',
-          metadata: {
-            ...event.metadata,
-            failedAttempts: failedLogins.length,
-          },
-        });
-      }
-    }
-
-    // Check suspicious activities
-    if (event.level === 'warning') {
-      const suspiciousEvents = recentEvents.filter(e => e.level === 'warning');
-      if (suspiciousEvents.length >= this.config.alertThresholds.suspiciousActivities) {
-        this.triggerAlert({
-          ...event,
-          type: 'SUSPICIOUS_ACTIVITY_DETECTED',
-          level: 'critical',
-          metadata: {
-            ...event.metadata,
-            eventCount: suspiciousEvents.length,
-          },
-        });
-      }
-    }
-
-    // Always alert on critical events
-    if (event.level === 'critical') {
-      this.triggerAlert(event);
-    }
-  }
-
-  /**
-   * Get recent events for user
-   */
-  private getRecentEvents(userId: string, timeWindow: number): AuditEvent[] {
-    const cutoff = Date.now() - timeWindow;
-    return this.events.filter(event =>
-      event.userId === userId &&
-      new Date(event.timestamp).getTime() > cutoff
-    );
-  }
-
-  /**
-   * Trigger alert callbacks
-   */
-  private triggerAlert(event: AuditEvent): void {
-    this.alertCallbacks.forEach(callback => {
-      try {
-        callback(event);
-      } catch (error) {
-        logger.error('Alert callback failed', { error, event });
-      }
-    });
-  }
-
-  /**
-   * Clean up old events
-   */
-  private cleanupEvents(): void {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - this.retentionDays);
-
-    this.events = this.events.filter(event =>
-      new Date(event.timestamp) > cutoff
-    );
-
-    logger.debug('Audit event cleanup completed', {
-      remainingEvents: this.events.length,
-    });
-  }
-
-  /**
-   * Start cleanup interval
-   */
-  private startCleanupInterval(): void {
-    setInterval(() => {
-      this.cleanupEvents();
-    }, 86400000); // Run daily
-  }
-
-  /**
-   * Verify event integrity
-   */
-  public verifyEventIntegrity(event: AuditEvent): boolean {
-    const originalHash = event.hash;
-    const { hash, ...eventWithoutHash } = event;
-    const calculatedHash = this.generateEventHash({ ...eventWithoutHash, hash: '' });
-    return originalHash === calculatedHash;
-  }
-
-  /**
-   * Get audit metrics
-   */
-  public getMetrics(): AuditMetrics {
-    const now = Date.now();
-    const last24h = now - 86400000;
-    const last7d = now - 604800000;
-
-    const events24h = this.events.filter(e => 
-      new Date(e.timestamp).getTime() > last24h
-    );
-    const events7d = this.events.filter(e => 
-      new Date(e.timestamp).getTime() > last7d
-    );
-
-    return {
-      totalEvents: this.events.length,
-      events24h: events24h.length,
-      events7d: events7d.length,
-      criticalEvents24h: events24h.filter(e => e.level === 'critical').length,
-      warningEvents24h: events24h.filter(e => e.level === 'warning').length,
-      topEventTypes: this.getTopEventTypes(),
-      activeUsers: this.getActiveUsers(),
-      integrityStatus: this.verifyAllEvents(),
+        timestamp: now
+      })
     };
-  }
 
-  /**
-   * Get top event types
-   */
-  private getTopEventTypes(): Record<string, number> {
-    const typeCounts: Record<string, number> = {};
-    this.events.forEach(event => {
-      typeCounts[event.type] = (typeCounts[event.type] || 0) + 1;
+    this.events.push(fullEvent);
+    this.enforceEventLimit();
+    await this.checkThresholds(fullEvent);
+
+    logger.log(fullEvent.level, fullEvent.message, {
+      eventId: fullEvent.id,
+      type: fullEvent.type,
+      userId: fullEvent.userId,
+      metadata: fullEvent.metadata
     });
-    return typeCounts;
   }
 
-  /**
-   * Get active users
-   */
-  private getActiveUsers(): number {
-    const uniqueUsers = new Set(
-      this.events
-        .filter(e => new Date(e.timestamp).getTime() > Date.now() - 86400000)
-        .map(e => e.userId)
-    );
-    return uniqueUsers.size;
+  private generateEventId(): string {
+    return `evt_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
 
-  /**
-   * Verify all events integrity
-   */
-  private verifyAllEvents(): boolean {
-    return this.events.every(event => this.verifyEventIntegrity(event));
+  private generateEventHash(event: Partial<AuditEvent>): string {
+    const data = JSON.stringify({
+      timestamp: event.timestamp,
+      type: event.type,
+      userId: event.userId,
+      sessionId: event.sessionId,
+      message: event.message,
+      metadata: event.metadata
+    });
+
+    return hashData(data);
+  }
+
+  private enforceEventLimit(): void {
+    if (this.events.length > this.config.maxEvents) {
+      const excess = this.events.length - this.config.maxEvents;
+      this.events.splice(0, excess);
+    }
+  }
+
+  private async checkThresholds(event: AuditEvent): Promise<void> {
+    const recentEvents = this.getRecentEvents();
+    const metrics = this.calculateMetrics(recentEvents);
+
+    if (event.level === 'critical' || metrics.criticalEvents >= this.config.alertThresholds.critical) {
+      await this.handleCriticalAlert(event, metrics);
+    } else if (event.level === 'warning' || metrics.warningEvents >= this.config.alertThresholds.warning) {
+      await this.handleWarningAlert(event, metrics);
+    }
+  }
+
+  private getRecentEvents(duration: number = 3600000): AuditEvent[] {
+    const cutoff = new Date(Date.now() - duration);
+    return this.events.filter(event => event.timestamp >= cutoff);
+  }
+
+  private calculateMetrics(events: AuditEvent[]): AuditMetrics {
+    const metrics: AuditMetrics = {
+      totalEvents: events.length,
+      criticalEvents: 0,
+      warningEvents: 0,
+      events24h: {
+        total: 0,
+        critical: 0,
+        warning: 0
+      }
+    };
+
+    const last24h = new Date(Date.now() - 24 * 3600000);
+
+    for (const event of events) {
+      if (event.level === 'critical') {
+        metrics.criticalEvents++;
+      } else if (event.level === 'warning') {
+        metrics.warningEvents++;
+      }
+
+      if (event.timestamp >= last24h) {
+        metrics.events24h.total++;
+        if (event.level === 'critical') {
+          metrics.events24h.critical++;
+        } else if (event.level === 'warning') {
+          metrics.events24h.warning++;
+        }
+      }
+    }
+
+    return metrics;
+  }
+
+  private async handleCriticalAlert(event: AuditEvent, metrics: AuditMetrics): Promise<void> {
+    logger.error('Critical security alert', {
+      event,
+      metrics,
+      threshold: this.config.alertThresholds.critical
+    });
+
+    // Here you would typically:
+    // 1. Send notifications to security team
+    // 2. Trigger incident response procedures
+    // 3. Update security dashboards
+    // 4. Log to external security monitoring systems
+  }
+
+  private async handleWarningAlert(event: AuditEvent, metrics: AuditMetrics): Promise<void> {
+    logger.warn('Security warning alert', {
+      event,
+      metrics,
+      threshold: this.config.alertThresholds.warning
+    });
+
+    // Here you would typically:
+    // 1. Update security dashboards
+    // 2. Log to monitoring systems
+    // 3. Send notifications if pattern detected
+  }
+
+  private startPeriodicCleanup(): void {
+    setInterval(() => {
+      const cutoff = new Date(Date.now() - this.config.retentionPeriod * 1000);
+      this.events = this.events.filter(event => event.timestamp >= cutoff);
+    }, 3600000); // Run cleanup every hour
+  }
+
+  async getMetrics(): Promise<AuditMetrics> {
+    return this.calculateMetrics(this.events);
+  }
+
+  async verifyEventIntegrity(event: AuditEvent): Promise<boolean> {
+    const computedHash = this.generateEventHash(event);
+    return computedHash === event.hash;
+  }
+
+  async searchEvents(options: {
+    startDate?: Date;
+    endDate?: Date;
+    level?: AuditLevel;
+    userId?: string;
+    type?: string;
+  }): Promise<AuditEvent[]> {
+    return this.events.filter(event => {
+      if (options.startDate && event.timestamp < options.startDate) return false;
+      if (options.endDate && event.timestamp > options.endDate) return false;
+      if (options.level && event.level !== options.level) return false;
+      if (options.userId && event.userId !== options.userId) return false;
+      if (options.type && event.type !== options.type) return false;
+      return true;
+    });
   }
 }
 

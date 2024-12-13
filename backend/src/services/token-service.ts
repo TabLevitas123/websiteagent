@@ -1,364 +1,148 @@
-import { ethers } from 'ethers';
-import ApiService from './api.service';
-import { logger } from '@/utils/logger';
-import TokenFactoryABI from '@/contracts/abis/TokenFactory.json';
-import AIAgentTokenABI from '@/contracts/abis/AIAgentToken.json';
-import { RetryConfig, TokenCreationParams, TokenInfo, TokenMetrics } from '@/types';
-import { validateTokenParams } from '@/utils/validation';
-import { calculateGasEstimate } from '@/utils/ethereum';
+import { TokenConfig, TokenInfo, TokenMetrics } from '../types';
+import { validateTokenData } from '../utils/validation';
+import logger from '../utils/logger';
+import { providers, Contract, Wallet, BigNumber } from 'ethers';
 
-export class TokenService extends ApiService {
-  private provider: ethers.providers.Web3Provider;
-  private factoryAddress: string;
+export class TokenService {
+  private provider: providers.JsonRpcProvider;
+  private wallet: Wallet;
+  private contract: Contract;
+  private config: Required<TokenConfig>;
 
-  constructor(
-    provider: ethers.providers.Web3Provider,
-    factoryAddress: string,
-    config: {
-      baseURL: string;
-      timeout?: number;
-      retryConfig?: RetryConfig;
-    }
-  ) {
-    super(config);
-    this.provider = provider;
-    this.factoryAddress = factoryAddress;
+  constructor(config: TokenConfig) {
+    this.config = {
+      apiBaseUrl: config.apiBaseUrl,
+      rpcUrl: config.rpcUrl,
+      network: config.network,
+      privateKey: config.privateKey,
+      contractAddress: config.contractAddress,
+      contractAbi: config.contractAbi,
+      timeout: config.timeout || 30000,
+      retries: config.retries || 3,
+      retryDelay: config.retryDelay || 1000,
+    };
 
-    logger.info('TokenService initialized', {
-      factoryAddress,
-      network: provider.network.name,
-    });
+    this.provider = new providers.JsonRpcProvider(this.config.rpcUrl);
+    this.wallet = new Wallet(this.config.privateKey, this.provider);
+    this.contract = new Contract(
+      this.config.contractAddress,
+      this.config.contractAbi,
+      this.wallet
+    );
   }
 
-  /**
-   * Create a new AI Agent token
-   * @param params Token creation parameters
-   * @returns Created token information
-   */
-  public async createToken(params: TokenCreationParams): Promise<TokenInfo> {
+  async createToken(tokenInfo: Partial<TokenInfo>): Promise<TokenInfo> {
     try {
-      // Validate parameters
-      validateTokenParams(params);
+      validateTokenData(tokenInfo);
 
-      // Get signer and factory contract
-      const signer = this.provider.getSigner();
-      const factory = new ethers.Contract(
-        this.factoryAddress,
-        TokenFactoryABI,
-        signer
+      const tx = await this.contract.createToken(
+        tokenInfo.name,
+        tokenInfo.symbol,
+        tokenInfo.decimals,
+        tokenInfo.totalSupply
       );
-
-      // Estimate gas and get optimal gas price
-      const gasEstimate = await calculateGasEstimate(
-        factory,
-        'createToken',
-        [
-          params.name,
-          params.symbol,
-          ethers.utils.parseUnits(params.initialSupply.toString(), 18),
-        ]
-      );
-
-      logger.info('Creating token', {
-        params,
-        gasEstimate,
-      });
-
-      // Create token with estimated gas
-      const tx = await factory.createToken(
-        params.name,
-        params.symbol,
-        ethers.utils.parseUnits(params.initialSupply.toString(), 18),
-        {
-          gasLimit: gasEstimate.gasLimit,
-          gasPrice: gasEstimate.gasPrice,
-        }
-      );
-
-      logger.debug('Token creation transaction sent', {
-        hash: tx.hash,
-      });
-
-      // Wait for transaction confirmation
       const receipt = await tx.wait();
-      const event = receipt.events?.find(
-        (e: any) => e.event === 'TokenCreated'
-      );
 
-      if (!event) {
-        throw new Error('Token creation event not found in transaction receipt');
-      }
-
-      const [owner, tokenAddress, tokenName, tokenSymbol, tokenId] = event.args;
-      const tokenInfo: TokenInfo = {
-        address: tokenAddress,
-        name: tokenName,
-        symbol: tokenSymbol,
-        id: tokenId.toString(),
-        owner,
-        createdAt: new Date().toISOString(),
-        deploymentTx: tx.hash,
+      const newToken: TokenInfo = {
+        id: receipt.events[0].args.tokenId.toString(),
+        name: tokenInfo.name!,
+        symbol: tokenInfo.symbol!,
+        decimals: tokenInfo.decimals!,
+        totalSupply: tokenInfo.totalSupply!,
+        owner: this.wallet.address,
+        status: 'active',
+        createdAt: new Date(),
+        metadata: tokenInfo.metadata
       };
 
-      // Store token info in database via API
-      await this.post('/api/tokens', tokenInfo);
-
-      logger.info('Token created successfully', {
-        tokenInfo,
-        transactionHash: tx.hash,
-      });
-
-      return tokenInfo;
+      logger.info(`Created token ${newToken.id}`);
+      return newToken;
     } catch (error) {
-      logger.error('Token creation failed', {
-        error,
-        params,
-      });
+      logger.error(`Error creating token: ${error}`);
       throw error;
     }
   }
 
-  /**
-   * Get token information by address
-   * @param address Token contract address
-   * @returns Token information and metrics
-   */
-  public async getTokenInfo(address: string): Promise<TokenInfo & TokenMetrics> {
+  async getToken(tokenId: string): Promise<TokenInfo> {
     try {
-      // Validate address
-      if (!ethers.utils.isAddress(address)) {
-        throw new Error('Invalid token address');
-      }
+      const tokenData = await this.contract.getToken(tokenId);
+      return {
+        id: tokenId,
+        name: tokenData.name,
+        symbol: tokenData.symbol,
+        decimals: tokenData.decimals.toNumber(),
+        totalSupply: tokenData.totalSupply.toString(),
+        owner: tokenData.owner,
+        status: tokenData.active ? 'active' : 'inactive',
+        createdAt: new Date(tokenData.createdAt.toNumber() * 1000),
+        metadata: tokenData.metadata || {}
+      };
+    } catch (error) {
+      logger.error(`Error getting token ${tokenId}: ${error}`);
+      throw error;
+    }
+  }
 
-      // Get token contract instance
-      const token = new ethers.Contract(
-        address,
-        AIAgentTokenABI,
-        this.provider
-      );
+  async updateToken(tokenId: string, updates: Partial<TokenInfo>): Promise<TokenInfo> {
+    try {
+      validateTokenData(updates);
+      const tx = await this.contract.updateToken(tokenId, updates);
+      await tx.wait();
 
-      // Fetch on-chain data
-      const [
-        name,
-        symbol,
-        totalSupply,
-        decimals,
-        owner,
-        isActive,
-      ] = await Promise.all([
-        token.name(),
-        token.symbol(),
-        token.totalSupply(),
-        token.decimals(),
-        token.owner(),
-        token.isActive ? token.isActive() : Promise.resolve(true),
+      const updatedToken = await this.getToken(tokenId);
+      logger.info(`Updated token ${tokenId}`);
+      return updatedToken;
+    } catch (error) {
+      logger.error(`Error updating token ${tokenId}: ${error}`);
+      throw error;
+    }
+  }
+
+  async getTokenMetrics(tokenId: string): Promise<TokenMetrics> {
+    try {
+      const [holders, transactions, volume24h, price] = await Promise.all([
+        this.contract.getHolderCount(tokenId),
+        this.contract.getTransactionCount(tokenId),
+        this.getVolume24h(tokenId),
+        this.getTokenPrice(tokenId)
       ]);
-
-      // Fetch token metrics from API
-      const metrics = await this.get<TokenMetrics>(`/api/tokens/${address}/metrics`);
-
-      logger.debug('Token info retrieved', {
-        address,
-        name,
-        symbol,
-        metrics,
-      });
 
       return {
-        address,
-        name,
-        symbol,
-        owner,
-        isActive,
-        totalSupply: ethers.utils.formatUnits(totalSupply, decimals),
-        decimals: decimals.toString(),
-        ...metrics,
+        holders: holders.toNumber(),
+        transactions: transactions.toNumber(),
+        volume24h: volume24h.toString(),
+        price: price.toString()
       };
     } catch (error) {
-      logger.error('Failed to get token info', {
-        error,
-        address,
-      });
+      logger.error(`Error getting metrics for token ${tokenId}: ${error}`);
       throw error;
     }
   }
 
-  /**
-   * Get all tokens owned by an address
-   * @param owner Owner address
-   * @returns Array of owned tokens
-   */
-  public async getTokensByOwner(owner: string): Promise<TokenInfo[]> {
-    try {
-      // Validate address
-      if (!ethers.utils.isAddress(owner)) {
-        throw new Error('Invalid owner address');
+  private async getVolume24h(tokenId: string): Promise<BigNumber> {
+    const filter = this.contract.filters.Transfer(null, null, null);
+    const currentBlock = await this.provider.getBlock('latest');
+    const oneDayAgo = currentBlock.timestamp - 24 * 60 * 60;
+    
+    const events = await this.contract.queryFilter(filter, oneDayAgo, 'latest');
+    const volume = events.reduce((total, event) => {
+      const args = event.args as { tokenId: BigNumber; value: BigNumber };
+      if (args && args.tokenId.toString() === tokenId) {
+        return total.add(args.value);
       }
+      return total;
+    }, BigNumber.from(0));
 
-      // Get factory contract
-      const factory = new ethers.Contract(
-        this.factoryAddress,
-        TokenFactoryABI,
-        this.provider
-      );
-
-      // Get token IDs owned by address
-      const tokenIds = await factory.getTokensByOwner(owner);
-
-      // Get token info for each ID
-      const tokens = await Promise.all(
-        tokenIds.map(async (tokenId: string) => {
-          const tokenAddress = await factory.tokenInfo(tokenId);
-          return this.getTokenInfo(tokenAddress);
-        })
-      );
-
-      logger.debug('Retrieved tokens by owner', {
-        owner,
-        tokenCount: tokens.length,
-      });
-
-      return tokens;
-    } catch (error) {
-      logger.error('Failed to get tokens by owner', {
-        error,
-        owner,
-      });
-      throw error;
-    }
+    return volume;
   }
 
-  /**
-   * Get token metrics and analytics
-   * @param address Token contract address
-   * @returns Token metrics and analytics
-   */
-  public async getTokenMetrics(address: string): Promise<TokenMetrics> {
+  private async getTokenPrice(tokenId: string): Promise<BigNumber> {
     try {
-      // Validate address
-      if (!ethers.utils.isAddress(address)) {
-        throw new Error('Invalid token address');
-      }
-
-      // Get token contract
-      const token = new ethers.Contract(
-        address,
-        AIAgentTokenABI,
-        this.provider
-      );
-
-      // Fetch token metrics from blockchain
-      const [
-        totalSupply,
-        holders,
-        transactions,
-      ] = await Promise.all([
-        token.totalSupply(),
-        this.getHolderCount(address),
-        this.getTransactionCount(address),
-      ]);
-
-      // Calculate additional metrics
-      const metrics: TokenMetrics = {
-        totalSupply: totalSupply.toString(),
-        holderCount: holders,
-        transactionCount: transactions,
-        price: await this.getTokenPrice(address),
-        volume24h: await this.get24hVolume(address),
-        marketCap: await this.getMarketCap(address),
-        updatedAt: new Date().toISOString(),
-      };
-
-      // Store metrics in database
-      await this.post(`/api/tokens/${address}/metrics`, metrics);
-
-      logger.debug('Token metrics updated', {
-        address,
-        metrics,
-      });
-
-      return metrics;
+      const price = await this.contract.getTokenPrice(tokenId);
+      return price;
     } catch (error) {
-      logger.error('Failed to get token metrics', {
-        error,
-        address,
-      });
-      throw error;
+      logger.error(`Error getting price for token ${tokenId}: ${error}`);
+      return BigNumber.from(0);
     }
-  }
-
-  /**
-   * Get token holder count
-   * @param address Token contract address
-   * @returns Number of unique token holders
-   */
-  private async getHolderCount(address: string): Promise<number> {
-    // Query transfer events to get unique addresses
-    const token = new ethers.Contract(
-      address,
-      AIAgentTokenABI,
-      this.provider
-    );
-
-    const filter = token.filters.Transfer();
-    const events = await token.queryFilter(filter);
-    const uniqueAddresses = new Set<string>();
-
-    events.forEach(event => {
-      uniqueAddresses.add(event.args.from);
-      uniqueAddresses.add(event.args.to);
-    });
-
-    // Remove zero address
-    uniqueAddresses.delete(ethers.constants.AddressZero);
-
-    return uniqueAddresses.size;
-  }
-
-  /**
-   * Get total transaction count
-   * @param address Token contract address
-   * @returns Number of token transactions
-   */
-  private async getTransactionCount(address: string): Promise<number> {
-    const token = new ethers.Contract(
-      address,
-      AIAgentTokenABI,
-      this.provider
-    );
-
-    const filter = token.filters.Transfer();
-    const events = await token.queryFilter(filter);
-    return events.length;
-  }
-
-  /**
-   * Get token price in ETH
-   * @param address Token contract address
-   * @returns Current token price
-   */
-  private async getTokenPrice(address: string): Promise<string> {
-    // TODO: Implement price fetching from DEX or price feed
-    return '0';
-  }
-
-  /**
-   * Get 24h trading volume
-   * @param address Token contract address
-   * @returns 24h trading volume
-   */
-  private async get24hVolume(address: string): Promise<string> {
-    // TODO: Implement volume calculation from DEX or analytics API
-    return '0';
-  }
-
-  /**
-   * Get token market cap
-   * @param address Token contract address
-   * @returns Current market cap
-   */
-  private async getMarketCap(address: string): Promise<string> {
-    // TODO: Implement market cap calculation
-    return '0';
   }
 }

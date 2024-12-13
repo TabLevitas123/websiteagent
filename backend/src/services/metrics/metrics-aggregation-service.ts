@@ -1,6 +1,5 @@
-import { IMetric } from '@/models/metric';
-import { logger } from '@/utils/logger';
-import { EventEmitter } from 'events';
+import { Metric } from '../../models/metric';
+import logger from '@/utils/logger';
 import { MetricsService } from './metrics.service';
 
 interface AggregateResult {
@@ -31,7 +30,18 @@ interface AggregateOptions {
   groupBy?: string[];
 }
 
-export class MetricsAggregationService extends EventEmitter {
+export interface AggregatedMetrics {
+  count: number;
+  sum: number;
+  average: number;
+  min: number;
+  max: number;
+  stdDev: number;
+  p95: number;
+  p99: number;
+}
+
+export class MetricsAggregationService extends MetricsService {
   private readonly metricsService: MetricsService;
 
   constructor(metricsService: MetricsService) {
@@ -95,10 +105,10 @@ export class MetricsAggregationService extends EventEmitter {
    * Group metrics by type and custom fields
    */
   private groupMetrics(
-    metrics: IMetric[],
+    metrics: Metric[],
     options: AggregateOptions
-  ): Record<string, IMetric[]> {
-    const grouped: Record<string, IMetric[]> = {};
+  ): Record<string, Metric[]> {
+    const grouped: Record<string, Metric[]> = {};
 
     for (const metric of metrics) {
       let key = metric.type;
@@ -130,7 +140,7 @@ export class MetricsAggregationService extends EventEmitter {
    * Calculate aggregates for a set of metrics
    */
   private async calculateAggregates(
-    metrics: IMetric[],
+    metrics: Metric[],
     functions?: Array<keyof AggregateResult['metrics']>
   ): Promise<AggregateResult['metrics']> {
     const values = metrics.map(m => m.value);
@@ -209,7 +219,7 @@ export class MetricsAggregationService extends EventEmitter {
     end: number,
     types?: string[],
     stdDevThreshold = 2
-  ): Promise<IMetric[]> {
+  ): Promise<Metric[]> {
     try {
       const metrics = await this.metricsService.getMetrics(start, end, types);
       const aggregatesByType = new Map<string, AggregateResult['metrics']>();
@@ -246,49 +256,83 @@ export class MetricsAggregationService extends EventEmitter {
     }
   }
 
-  /**
-   * Get metric anomalies based on standard deviation
-   */
-  public async getAnomalies(
-    start: number,
-    end: number,
-    types?: string[],
-    stdDevThreshold = 2
-  ): Promise<IMetric[]> {
-    try {
-      const metrics = await this.metricsService.getMetrics(start, end, types);
-      const aggregatesByType = new Map<string, AggregateResult['metrics']>();
-
-      // Calculate aggregates for each type
-      for (const type of new Set(metrics.map(m => m.type))) {
-        const typeMetrics = metrics.filter(m => m.type === type);
-        const aggregates = await this.calculateAggregates(typeMetrics);
-        aggregatesByType.set(type, aggregates);
-      }
-
-      // Find anomalies
-      const anomalies = metrics.filter(metric => {
-        const aggregates = aggregatesByType.get(metric.type);
-        if (!aggregates) return false;
-
-        const deviations = Math.abs(metric.value - aggregates.avg) / aggregates.stdDev;
-        return deviations > stdDevThreshold;
-      });
-
-      logger.info('Anomalies detected', {
-        start,
-        end,
-        types,
-        anomalyCount: anomalies.length,
-        totalCount: metrics.length
-      });
-
-      return anomalies;
-
-    } catch (error) {
-      logger.error('Failed to detect anomalies', { error });
-      throw error;
+  async aggregateMetrics(metrics: Metric[]): Promise<AggregatedMetrics> {
+    if (!metrics || metrics.length === 0) {
+      return {
+        count: 0,
+        sum: 0,
+        average: 0,
+        min: 0,
+        max: 0,
+        stdDev: 0,
+        p95: 0,
+        p99: 0
+      };
     }
+
+    const values = metrics.map(m => m.value).sort((a, b) => a - b);
+    const count = values.length;
+    const sum = values.reduce((acc, val) => acc + val, 0);
+    const average = sum / count;
+    const min = values[0];
+    const max = values[count - 1];
+
+    // Calculate standard deviation
+    const squaredDiffs = values.map(value => Math.pow(value - average, 2));
+    const avgSquaredDiff = squaredDiffs.reduce((acc, val) => acc + val, 0) / count;
+    const stdDev = Math.sqrt(avgSquaredDiff);
+
+    // Calculate percentiles
+    const p95Index = Math.ceil(count * 0.95) - 1;
+    const p99Index = Math.ceil(count * 0.99) - 1;
+
+    return {
+      count,
+      sum,
+      average,
+      min,
+      max,
+      stdDev,
+      p95: values[p95Index],
+      p99: values[p99Index]
+    };
+  }
+
+  async getAggregatedMetricsByType(type: string, startTime: Date, endTime: Date): Promise<AggregatedMetrics> {
+    const metrics = await this.metricsService.getMetricsInTimeRange(startTime, endTime);
+    const filteredMetrics = metrics.filter(metric => metric.type === type);
+    return this.aggregateMetrics(filteredMetrics);
+  }
+
+  async getAggregatedMetricsByTimeWindow(
+    type: string,
+    startTime: Date,
+    endTime: Date,
+    windowSize: number
+  ): Promise<Map<string, AggregatedMetrics>> {
+    const metrics = await this.metricsService.getMetricsInTimeRange(startTime, endTime);
+    const filteredMetrics = metrics.filter(metric => metric.type === type);
+    
+    const windows = new Map<string, Metric[]>();
+    
+    filteredMetrics.forEach(metric => {
+      const windowStart = new Date(
+        Math.floor(metric.timestamp.getTime() / windowSize) * windowSize
+      );
+      const key = windowStart.toISOString();
+      
+      if (!windows.has(key)) {
+        windows.set(key, []);
+      }
+      windows.get(key)!.push(metric);
+    });
+
+    const result = new Map<string, AggregatedMetrics>();
+    for (const [key, windowMetrics] of windows) {
+      result.set(key, await this.aggregateMetrics(windowMetrics));
+    }
+
+    return result;
   }
 }
 

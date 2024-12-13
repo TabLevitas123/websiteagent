@@ -2,22 +2,16 @@ import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
 import { ApiServiceConfig } from '../types';
 import logger from '../utils/logger';
 
-export class ApiServiceBase {
+export class ApiService {
   protected client: AxiosInstance;
   protected config: ApiServiceConfig;
   protected retryCount: number = 0;
 
   constructor(config: ApiServiceConfig) {
-    this.config = {
-      baseURL: config.baseURL,
-      timeout: config.timeout || 5000,
-      retries: config.retries || 3,
-      retryDelay: config.retryDelay || 1000
-    };
-
+    this.config = config;
     this.client = axios.create({
-      baseURL: this.config.baseURL,
-      timeout: this.config.timeout
+      baseURL: config.baseURL,
+      timeout: config.timeout,
     });
 
     this.setupInterceptors();
@@ -31,25 +25,20 @@ export class ApiServiceBase {
           return Promise.reject(error);
         }
 
-        // Handle rate limiting
-        if (error.response?.status === 429) {
-          const retryAfter = parseInt(error.response.headers['retry-after']) || this.config.retryDelay;
-          await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-          return this.client(error.config);
+        if (this.retryCount >= this.config.retries) {
+          this.retryCount = 0;
+          return Promise.reject(error);
         }
 
-        // Handle other retryable errors
-        if (error.response?.status >= 500 && this.retryCount < this.config.retries) {
+        if (error.response?.status === 429 || (error.response?.status >= 500 && error.response?.status <= 599)) {
           this.retryCount++;
           const delay = this.config.retryDelay * Math.pow(2, this.retryCount - 1);
-          
           logger.warn(`Retrying request (attempt ${this.retryCount}/${this.config.retries}) after ${delay}ms`);
-          await new Promise(resolve => setTimeout(resolve, delay));
           
+          await new Promise(resolve => setTimeout(resolve, delay));
           return this.client(error.config);
         }
 
-        this.retryCount = 0;
         return Promise.reject(error);
       }
     );
