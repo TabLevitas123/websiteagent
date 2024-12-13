@@ -1,0 +1,185 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+import "./interfaces/ITokenFactory.sol";
+import "./AIAgentToken.sol";
+
+/**
+ * @title TokenFactory
+ * @dev Enterprise-grade factory contract for creating AI Agent tokens
+ * @notice Handles creation and management of AI Agent tokens with secure payment processing
+ */
+contract TokenFactory is ITokenFactory, Ownable, ReentrancyGuard, Pausable {
+    using Counters for Counters.Counter;
+
+    // State variables
+    Counters.Counter private _tokenCounter;
+    uint256 public constant CREATION_FEE = 0.006 ether;
+    mapping(uint256 => address) public tokenToOwner;
+    mapping(address => uint256[]) public ownerToTokens;
+    mapping(uint256 => TokenInfo) public tokenInfo;
+
+    // Events
+    event TokenCreated(
+        address indexed owner,
+        address indexed tokenAddress,
+        string name,
+        string symbol,
+        uint256 indexed tokenId
+    );
+    event FeeUpdated(uint256 newFee);
+    event PaymentProcessed(address indexed from, uint256 amount);
+    event EmergencyShutdown(bool isPaused);
+
+    // Structs
+    struct TokenInfo {
+        address tokenAddress;
+        string name;
+        string symbol;
+        uint256 creationTime;
+        bool isActive;
+    }
+
+    // Modifiers
+    modifier validFee() {
+        require(msg.value >= CREATION_FEE, "Insufficient payment");
+        _;
+    }
+
+    modifier validParameters(string memory name, string memory symbol) {
+        require(bytes(name).length > 0, "Name cannot be empty");
+        require(bytes(symbol).length > 0, "Symbol cannot be empty");
+        require(bytes(symbol).length <= 11, "Symbol too long");
+        _;
+    }
+
+    /**
+     * @dev Constructor
+     * @notice Initializes the contract with default settings
+     */
+    constructor() {
+        _tokenCounter.increment(); // Start counter at 1
+    }
+
+    /**
+     * @dev Creates a new AI Agent token
+     * @param name Token name
+     * @param symbol Token symbol
+     * @param initialSupply Initial token supply
+     * @return address The address of the newly created token
+     */
+    function createToken(
+        string memory name,
+        string memory symbol,
+        uint256 initialSupply
+    )
+        external
+        payable
+        override
+        whenNotPaused
+        nonReentrant
+        validFee
+        validParameters(name, symbol)
+        returns (address)
+    {
+        uint256 currentTokenId = _tokenCounter.current();
+        
+        // Create new token contract
+        AIAgentToken newToken = new AIAgentToken(
+            name,
+            symbol,
+            initialSupply,
+            msg.sender
+        );
+
+        // Update mappings
+        tokenToOwner[currentTokenId] = msg.sender;
+        ownerToTokens[msg.sender].push(currentTokenId);
+        
+        tokenInfo[currentTokenId] = TokenInfo({
+            tokenAddress: address(newToken),
+            name: name,
+            symbol: symbol,
+            creationTime: block.timestamp,
+            isActive: true
+        });
+
+        // Process payment
+        _processPayment();
+
+        // Increment counter
+        _tokenCounter.increment();
+
+        emit TokenCreated(
+            msg.sender,
+            address(newToken),
+            name,
+            symbol,
+            currentTokenId
+        );
+
+        return address(newToken);
+    }
+
+    /**
+     * @dev Processes the payment for token creation
+     * @notice Handles the payment and emits event
+     */
+    function _processPayment() private {
+        // Return excess payment
+        uint256 excess = msg.value - CREATION_FEE;
+        if (excess > 0) {
+            (bool success, ) = payable(msg.sender).call{value: excess}("");
+            require(success, "Excess payment return failed");
+        }
+
+        emit PaymentProcessed(msg.sender, CREATION_FEE);
+    }
+
+    /**
+     * @dev Retrieves tokens owned by an address
+     * @param owner Address to query
+     * @return uint256[] Array of token IDs owned by the address
+     */
+    function getTokensByOwner(address owner)
+        external
+        view
+        returns (uint256[] memory)
+    {
+        return ownerToTokens[owner];
+    }
+
+    /**
+     * @dev Emergency pause function
+     * @notice Allows owner to pause contract in emergency
+     */
+    function togglePause() external onlyOwner {
+        if (paused()) {
+            _unpause();
+        } else {
+            _pause();
+        }
+        emit EmergencyShutdown(paused());
+    }
+
+    /**
+     * @dev Withdraws accumulated fees
+     * @notice Allows owner to withdraw accumulated fees
+     */
+    function withdrawFees() external onlyOwner nonReentrant {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No fees to withdraw");
+        
+        (bool success, ) = payable(owner()).call{value: balance}("");
+        require(success, "Withdrawal failed");
+    }
+
+    // Receive function to accept ETH payments
+    receive() external payable {
+        emit PaymentProcessed(msg.sender, msg.value);
+    }
+}

@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/draft-ERC20Permit.sol";
+
+/**
+ * @title AIAgentToken
+ * @dev Implementation of the AI Agent Token with advanced features
+ */
+contract AIAgentToken is ERC20, ERC20Burnable, Pausable, AccessControl, ERC20Permit {
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    
+    uint8 private constant DECIMALS = 18;
+    uint256 private _maxSupply;
+    
+    // Events
+    event MaxSupplyUpdated(uint256 newMaxSupply);
+    event TokensLocked(address indexed account, uint256 amount, uint256 unlockTime);
+    
+    // Structs
+    struct LockInfo {
+        uint256 amount;
+        uint256 unlockTime;
+    }
+    
+    // Mapping for token locks
+    mapping(address => LockInfo[]) private _locks;
+
+    /**
+     * @dev Constructor
+     * @param name_ Token name
+     * @param symbol_ Token symbol
+     * @param initialSupply Initial token supply
+     * @param owner Token owner address
+     */
+    constructor(
+        string memory name_,
+        string memory symbol_,
+        uint256 initialSupply,
+        address owner
+    ) ERC20(name_, symbol_) ERC20Permit(name_) {
+        require(owner != address(0), "Invalid owner address");
+        
+        _maxSupply = initialSupply * 2;
+        
+        _setupRole(DEFAULT_ADMIN_ROLE, owner);
+        _setupRole(PAUSER_ROLE, owner);
+        _setupRole(MINTER_ROLE, owner);
+        
+        _mint(owner, initialSupply * 10**decimals());
+    }
+
+    /**
+     * @dev Pauses token transfers
+     * @notice Only addresses with PAUSER_ROLE can pause
+     */
+    function pause() public onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @dev Unpauses token transfers
+     * @notice Only addresses with PAUSER_ROLE can unpause
+     */
+    function unpause() public onlyRole(PAUSER_ROLE) {
+        _unpause();
+    }
+
+    /**
+     * @dev Mints new tokens
+     * @param to Recipient address
+     * @param amount Amount to mint
+     * @notice Only addresses with MINTER_ROLE can mint
+     */
+    function mint(address to, uint256 amount) public onlyRole(MINTER_ROLE) {
+        require(totalSupply() + amount <= _maxSupply, "Would exceed max supply");
+        _mint(to, amount);
+    }
+
+    /**
+     * @dev Updates max supply
+     * @param newMaxSupply New maximum supply
+     * @notice Only admin can update max supply
+     */
+    function updateMaxSupply(uint256 newMaxSupply) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newMaxSupply >= totalSupply(), "New max supply below current supply");
+        _maxSupply = newMaxSupply;
+        emit MaxSupplyUpdated(newMaxSupply);
+    }
+
+    /**
+     * @dev Locks tokens for a specified time
+     * @param amount Amount to lock
+     * @param lockDuration Duration of lock in seconds
+     */
+    function lockTokens(uint256 amount, uint256 lockDuration) external {
+        require(amount > 0, "Amount must be greater than 0");
+        require(lockDuration > 0, "Duration must be greater than 0");
+        require(balanceOf(msg.sender) >= amount, "Insufficient balance");
+
+        uint256 unlockTime = block.timestamp + lockDuration;
+        _locks[msg.sender].push(LockInfo({
+            amount: amount,
+            unlockTime: unlockTime
+        }));
+
+        emit TokensLocked(msg.sender, amount, unlockTime);
+    }
+
+    /**
+     * @dev Gets locked tokens info for an address
+     * @param account Address to query
+     * @return LockInfo[] Array of lock information
+     */
+    function getLockedTokens(address account) external view returns (LockInfo[] memory) {
+        return _locks[account];
+    }
+
+    /**
+     * @dev Hook that is called before any transfer of tokens
+     * @param from Sender address
+     * @param to Recipient address
+     * @param amount Amount being transferred
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual override whenNotPaused {
+        if (from != address(0)) {
+            uint256 lockedAmount = 0;
+            LockInfo[] storage accountLocks = _locks[from];
+            
+            for (uint256 i = 0; i < accountLocks.length; i++) {
+                if (accountLocks[i].unlockTime > block.timestamp) {
+                    lockedAmount += accountLocks[i].amount;
+                }
+            }
+            
+            require(
+                balanceOf(from) - lockedAmount >= amount,
+                "Transfer amount exceeds unlocked balance"
+            );
+        }
+        
+        super._beforeTokenTransfer(from, to, amount);
+    }
+
+    /**
+     * @dev Returns the number of decimals used for token
+     */
+    function decimals() public pure override returns (uint8) {
+        return DECIMALS;
+    }
+
+    /**
+     * @dev Returns the maximum supply of tokens
+     */
+    function maxSupply() public view returns (uint256) {
+        return _maxSupply;
+    }
+}

@@ -1,0 +1,198 @@
+import { useState, useCallback, useEffect } from 'react';
+import { logger } from '@/utils/logger';
+
+interface ErrorEvent {
+  error: Error;
+  type: 'api' | 'runtime' | 'network' | 'validation' | 'security';
+  timestamp: number;
+  metadata?: Record<string, any>;
+}
+
+interface ErrorMetrics {
+  totalErrors: number;
+  errorsByType: Record<string, number>;
+  lastError?: ErrorEvent;
+  errorRate: number;
+  averageRecoveryTime: number;
+}
+
+interface ErrorTrackingConfig {
+  captureGlobal?: boolean;
+  maxErrors?: number;
+  samplingRate?: number;
+  reportingEndpoint?: string;
+  retentionPeriod?: number; // in milliseconds
+}
+
+const defaultConfig: Required<ErrorTrackingConfig> = {
+  captureGlobal: true,
+  maxErrors: 1000,
+  samplingRate: 1.0, // 100%
+  reportingEndpoint: '/api/log-error',
+  retentionPeriod: 24 * 60 * 60 * 1000, // 24 hours
+};
+
+export const useErrorTracking = (config?: ErrorTrackingConfig) => {
+  const [errors, setErrors] = useState<ErrorEvent[]>([]);
+  const [metrics, setMetrics] = useState<ErrorMetrics>({
+    totalErrors: 0,
+    errorsByType: {},
+    errorRate: 0,
+    averageRecoveryTime: 0
+  });
+
+  const fullConfig = { ...defaultConfig, ...config };
+
+  // Track error
+  const trackError = useCallback(async (
+    error: Error,
+    type: ErrorEvent['type'],
+    metadata?: Record<string, any>
+  ) => {
+    try {
+      // Apply sampling rate
+      if (Math.random() > fullConfig.samplingRate) {
+        return;
+      }
+
+      const errorEvent: ErrorEvent = {
+        error,
+        type,
+        timestamp: Date.now(),
+        metadata: {
+          url: window.location.href,
+          userAgent: navigator.userAgent,
+          ...metadata
+        }
+      };
+
+      // Update errors list
+      setErrors(prev => {
+        const newErrors = [...prev, errorEvent].slice(-fullConfig.maxErrors);
+        return newErrors;
+      });
+
+      // Update metrics
+      updateMetrics(errorEvent);
+
+      // Report error
+      await reportError(errorEvent);
+
+      logger.error('Error tracked:', {
+        type,
+        message: error.message,
+        metadata
+      });
+
+    } catch (err) {
+      logger.error('Failed to track error:', err);
+    }
+  }, [fullConfig.samplingRate, fullConfig.maxErrors]);
+
+  // Report error to backend
+  const reportError = async (errorEvent: ErrorEvent) => {
+    try {
+      const response = await fetch(fullConfig.reportingEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...errorEvent,
+          error: {
+            name: errorEvent.error.name,
+            message: errorEvent.error.message,
+            stack: errorEvent.error.stack,
+          }
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to report error');
+      }
+    } catch (err) {
+      logger.error('Error reporting failed:', err);
+    }
+  };
+
+  // Update error metrics
+  const updateMetrics = useCallback((errorEvent: ErrorEvent) => {
+    setMetrics(prev => {
+      const now = Date.now();
+      
+      // Calculate error rate (errors per minute)
+      const oneMinuteAgo = now - 60000;
+      const recentErrors = errors.filter(e => e.timestamp > oneMinuteAgo).length + 1;
+      const errorRate = recentErrors / 1;
+
+      // Calculate average recovery time
+      const recoveryTimes = errors
+        .map((e, i) => errors[i + 1]?.timestamp - e.timestamp)
+        .filter(time => time !== undefined) as number[];
+      const avgRecoveryTime = recoveryTimes.length
+        ? recoveryTimes.reduce((a, b) => a + b, 0) / recoveryTimes.length
+        : prev.averageRecoveryTime;
+
+      // Update error counts by type
+      const errorsByType = {
+        ...prev.errorsByType,
+        [errorEvent.type]: (prev.errorsByType[errorEvent.type] || 0) + 1
+      };
+
+      return {
+        totalErrors: prev.totalErrors + 1,
+        errorsByType,
+        lastError: errorEvent,
+        errorRate,
+        averageRecoveryTime: avgRecoveryTime
+      };
+    });
+  }, [errors]);
+
+  // Set up global error handler
+  useEffect(() => {
+    if (!fullConfig.captureGlobal) return;
+
+    const handleGlobalError = (event: ErrorEvent) => {
+      trackError(
+        event.error,
+        'runtime',
+        { unhandled: true }
+      );
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      trackError(
+        event.reason instanceof Error ? event.reason : new Error(String(event.reason)),
+        'runtime',
+        { unhandled: true, promise: true }
+      );
+    };
+
+    window.addEventListener('error', handleGlobalError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+
+    return () => {
+      window.removeEventListener('error', handleGlobalError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, [fullConfig.captureGlobal, trackError]);
+
+  // Clean up old errors
+  useEffect(() => {
+    const cleanup = () => {
+      const cutoff = Date.now() - fullConfig.retentionPeriod;
+      setErrors(prev => prev.filter(error => error.timestamp >= cutoff));
+    };
+
+    const timer = setInterval(cleanup, 60000); // Run every minute
+    return () => clearInterval(timer);
+  }, [fullConfig.retentionPeriod]);
+
+  return {
+    errors,
+    metrics,
+    trackError,
+    clearErrors: () => setErrors([]),
+    getErrorsByType: (type: ErrorEvent['type']) => 
+      errors.filter(e => e.

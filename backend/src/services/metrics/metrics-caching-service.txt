@@ -1,0 +1,381 @@
+import { Redis } from 'ioredis';
+import { logger } from '@/utils/logger';
+import { IMetric } from '@/models/metric';
+import { EventEmitter } from 'events';
+
+interface CacheConfig {
+  defaultTTL?: number; // seconds
+  namespace?: string;
+  maxCacheSize?: number; // bytes
+  compressionThreshold?: number; // bytes
+  compressionLevel?: number; // 1-9
+}
+
+interface CacheStats {
+  hits: number;
+  misses: number;
+  size: number;
+  keys: number;
+  memory: number;
+}
+
+interface CachedMetrics {
+  metrics: IMetric[];
+  timestamp: number;
+  metadata?: Record<string, any>;
+}
+
+export class MetricsCachingService extends EventEmitter {
+  private readonly redis: Redis;
+  private readonly config: Required<CacheConfig>;
+  private readonly stats: CacheStats;
+
+  constructor(redisUrl: string, config?: CacheConfig) {
+    super();
+    this.redis = new Redis(redisUrl);
+    
+    this.config = {
+      defaultTTL: 300, // 5 minutes
+      namespace: 'metrics',
+      maxCacheSize: 100 * 1024 * 1024, // 100MB
+      compressionThreshold: 1024, // 1KB
+      compressionLevel: 6,
+      ...config
+    };
+
+    this.stats = {
+      hits: 0,
+      misses: 0,
+      size: 0,
+      keys: 0,
+      memory: 0
+    };
+
+    // Set up cleanup interval
+    setInterval(() => this.cleanup(), 60000); // Run cleanup every minute
+
+    // Monitor memory usage
+    setInterval(() => this.updateStats(), 5000);
+
+    logger.info('MetricsCachingService initialized', {
+      config: this.config
+    });
+  }
+
+  /**
+   * Cache metrics data
+   */
+  public async cacheMetrics(
+    key: string,
+    metrics: IMetric[],
+    ttl?: number,
+    metadata?: Record<string, any>
+  ): Promise<void> {
+    try {
+      const cacheKey = this.getCacheKey(key);
+      const data: CachedMetrics = {
+        metrics,
+        timestamp: Date.now(),
+        metadata
+      };
+
+      // Check cache size before storing
+      if (await this.wouldExceedMaxSize(data)) {
+        await this.evictOldEntries();
+      }
+
+      // Compress data if needed
+      const serializedData = await this.serializeData(data);
+
+      // Store in Redis with TTL
+      await this.redis.set(
+        cacheKey,
+        serializedData,
+        'EX',
+        ttl || this.config.defaultTTL
+      );
+
+      this.stats.keys++;
+      this.stats.size += serializedData.length;
+
+      logger.debug('Metrics cached', {
+        key: cacheKey,
+        metricsCount: metrics.length,
+        size: serializedData.length
+      });
+
+    } catch (error) {
+      logger.error('Failed to cache metrics', { error, key });
+      throw error;
+    }
+  }
+
+  /**
+   * Retrieve cached metrics
+   */
+  public async getCachedMetrics(
+    key: string
+  ): Promise<CachedMetrics | null> {
+    try {
+      const cacheKey = this.getCacheKey(key);
+      const data = await this.redis.get(cacheKey);
+
+      if (!data) {
+        this.stats.misses++;
+        return null;
+      }
+
+      this.stats.hits++;
+
+      // Decompress and parse data
+      const cachedData = await this.deserializeData(data);
+
+      logger.debug('Cache hit', {
+        key: cacheKey,
+        metricsCount: cachedData.metrics.length
+      });
+
+      return cachedData;
+
+    } catch (error) {
+      logger.error('Failed to get cached metrics', { error, key });
+      throw error;
+    }
+  }
+
+  /**
+   * Invalidate cached metrics
+   */
+  public async invalidateCache(pattern?: string): Promise<void> {
+    try {
+      const keys = await this.redis.keys(
+        this.getCacheKey(pattern || '*')
+      );
+
+      if (keys.length > 0) {
+        await this.redis.del(...keys);
+        
+        this.stats.keys -= keys.length;
+        logger.info('Cache invalidated', {
+          pattern,
+          keysRemoved: keys.length
+        });
+      }
+
+    } catch (error) {
+      logger.error('Failed to invalidate cache', { error, pattern });
+      throw error;
+    }
+  }
+
+  /**
+   * Get cache statistics
+   */
+  public async getStats(): Promise<CacheStats> {
+    await this.updateStats();
+    return this.stats;
+  }
+
+  /**
+   * Update cache statistics
+   */
+  private async updateStats(): Promise<void> {
+    try {
+      const info = await this.redis.info('memory');
+      const usedMemory = parseInt(
+        info.match(/used_memory:(\d+)/)?.[1] || '0'
+      );
+      this.stats.memory = usedMemory;
+
+    } catch (error) {
+      logger.error('Failed to update cache stats', { error });
+    }
+  }
+
+  /**
+   * Clean up expired/invalid entries
+   */
+  private async cleanup(): Promise<void> {
+    try {
+      // Clean up expired keys
+      const keys = await this.redis.keys(this.getCacheKey('*'));
+      let cleaned = 0;
+
+      for (const key of keys) {
+        const ttl = await this.redis.ttl(key);
+        if (ttl <= 0) {
+          await this.redis.del(key);
+          cleaned++;
+          this.stats.keys--;
+        }
+      }
+
+      if (cleaned > 0) {
+        logger.info('Cache cleanup completed', {
+          keysRemoved: cleaned
+        });
+      }
+
+      // Check memory usage
+      await this.updateStats();
+      if (this.stats.memory > this.config.maxCacheSize) {
+        await this.evictOldEntries();
+      }
+
+    } catch (error) {
+      logger.error('Cache cleanup failed', { error });
+    }
+  }
+
+  /**
+   * Evict old entries when cache is full
+   */
+  private async evictOldEntries(): Promise<void> {
+    try {
+      const keys = await this.redis.keys(this.getCacheKey('*'));
+      const keyData = await Promise.all(
+        keys.map(async key => {
+          const data = await this.redis.get(key);
+          return {
+            key,
+            size: data?.length || 0,
+            ttl: await this.redis.ttl(key)
+          };
+        })
+      );
+
+      // Sort by TTL ascending (remove entries expiring soonest)
+      keyData.sort((a, b) => a.ttl - b.ttl);
+
+      let freedSpace = 0;
+      const targetSize = this.config.maxCacheSize * 0.8; // Free up 20%
+
+      for (const { key, size } of keyData) {
+        await this.redis.del(key);
+        freedSpace += size;
+        this.stats.keys--;
+        this.stats.size -= size;
+
+        if (this.stats.memory - freedSpace <= targetSize) {
+          break;
+        }
+      }
+
+      logger.info('Cache eviction completed', {
+        freedSpace,
+        remainingKeys: this.stats.keys
+      });
+
+    } catch (error) {
+      logger.error('Cache eviction failed', { error });
+    }
+  }
+
+  /**
+   * Check if adding data would exceed max size
+   */
+  private async wouldExceedMaxSize(data: CachedMetrics): Promise<boolean> {
+    const serialized = await this.serializeData(data);
+    return this.stats.size + serialized.length > this.config.maxCacheSize;
+  }
+
+  /**
+   * Serialize and potentially compress data
+   */
+  private async serializeData(data: CachedMetrics): Promise<string> {
+    const serialized = JSON.stringify(data);
+
+    if (serialized.length > this.config.compressionThreshold) {
+      const compressed = await this.compress(serialized);
+      return `c:${compressed}`; // Prefix to indicate compressed data
+    }
+
+    return `r:${serialized}`; // Prefix to indicate raw data
+  }
+
+  /**
+   * Deserialize and decompress data if needed
+   */
+  private async deserializeData(data: string): Promise<CachedMetrics> {
+    const [prefix, ...rest] = data.split(':');
+    const content = rest.join(':'); // Rejoin in case data contains colons
+
+    if (prefix === 'c') {
+      const decompressed = await this.decompress(content);
+      return JSON.parse(decompressed);
+    }
+
+    return JSON.parse(content);
+  }
+
+  /**
+   * Serialize and potentially compress data
+   */
+  private async serializeData(data: CachedMetrics): Promise<string> {
+    const serialized = JSON.stringify(data);
+
+    if (serialized.length > this.config.compressionThreshold) {
+      const compressed = await this.compress(serialized);
+      return `c:${compressed}`; // Prefix to indicate compressed data
+    }
+
+    return `r:${serialized}`; // Prefix to indicate raw data
+  }
+
+  /**
+   * Deserialize and decompress data if needed
+   */
+  private async deserializeData(data: string): Promise<CachedMetrics> {
+    const [prefix, ...rest] = data.split(':');
+    const content = rest.join(':'); // Rejoin in case data contains colons
+
+    if (prefix === 'c') {
+      const decompressed = await this.decompress(content);
+      return JSON.parse(decompressed);
+    }
+
+    return JSON.parse(content);
+  }
+
+  /**
+   * Compress string data
+   */
+  private async compress(data: string): Promise<string> {
+    const { deflate } = await import('zlib');
+    const { promisify } = await import('util');
+    const deflateAsync = promisify(deflate);
+
+    const buffer = await deflateAsync(data, {
+      level: this.config.compressionLevel
+    });
+    return buffer.toString('base64');
+  }
+
+  /**
+   * Decompress string data
+   */
+  private async decompress(data: string): Promise<string> {
+    const { inflate } = await import('zlib');
+    const { promisify } = await import('util');
+    const inflateAsync = promisify(inflate);
+
+    const buffer = await inflateAsync(Buffer.from(data, 'base64'));
+    return buffer.toString();
+  }
+
+  /**
+   * Get full cache key with namespace
+   */
+  private getCacheKey(key: string): string {
+    return `${this.config.namespace}:${key}`;
+  }
+
+  /**
+   * Close Redis connection
+   */
+  public async close(): Promise<void> {
+    await this.redis.quit();
+  }
+}
+
+export default MetricsCachingService;

@@ -1,0 +1,337 @@
+import jwt from 'jsonwebtoken';
+import { logger } from '@/utils/logger';
+import { 
+  JWTConfig,
+  UserRole,
+  TokenPayload,
+  MFATokenPayload,
+  JWTTokens
+} from '@/types';
+import { generateSecureKey } from '@/utils/crypto';
+
+export class TokenManager {
+  private config: JWTConfig;
+  private blacklistedTokens: Set<string> = new Set();
+
+  constructor(config: JWTConfig) {
+    this.config = {
+      accessTokenSecret: config.accessTokenSecret || generateSecureKey(),
+      refreshTokenSecret: config.refreshTokenSecret || generateSecureKey(),
+      mfaTokenSecret: config.mfaTokenSecret || generateSecureKey(),
+      accessTokenExpiry: config.accessTokenExpiry || '15m',
+      refreshTokenExpiry: config.refreshTokenExpiry || '7d',
+      mfaTokenExpiry: config.mfaTokenExpiry || '5m',
+    };
+
+    logger.info('TokenManager initialized');
+  }
+
+  /**
+   * Generate access and refresh tokens
+   */
+  public async refreshTokens(refreshToken: string): Promise<{
+    accessToken: string;
+    refreshToken: string;
+  }> {
+    try {
+      // Verify refresh token
+      const payload = await this.verifyRefreshToken(refreshToken);
+
+      // Get user roles
+      const roles = await this.getUserRoles(payload.userId);
+
+      // Generate new tokens
+      const accessToken = await this.createAccessToken(payload.userId, roles);
+      const newRefreshToken = await this.createRefreshToken(payload.userId);
+
+      // Blacklist old refresh token
+      this.blacklistedTokens.add(refreshToken);
+
+      return {
+        accessToken,
+        refreshToken: newRefreshToken,
+      };
+    } catch (error) {
+      logger.error('Token refresh failed', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Revoke token
+   */
+  public async revokeToken(token: string): Promise<void> {
+    this.blacklistedTokens.add(token);
+    logger.info('Token revoked', { token: token.substring(0, 10) + '...' });
+  }
+
+  /**
+   * Check if token is blacklisted
+   */
+  public isTokenBlacklisted(token: string): boolean {
+    return this.blacklistedTokens.has(token);
+  }
+
+  /**
+   * Clear expired tokens from blacklist
+   */
+  private clearExpiredTokens(): void {
+    for (const token of this.blacklistedTokens) {
+      try {
+        jwt.verify(token, this.config.accessTokenSecret);
+      } catch (error) {
+        if (error instanceof jwt.TokenExpiredError) {
+          this.blacklistedTokens.delete(token);
+        }
+      }
+    }
+  }
+
+  /**
+   * Get user roles
+   */
+  private async getUserRoles(userId: string): Promise<UserRole[]> {
+    try {
+      // In a real implementation, this would fetch roles from a database
+      // For now, return default roles
+      return ['user'];
+    } catch (error) {
+      logger.error('Failed to get user roles', { error, userId });
+      throw error;
+    }
+  }
+
+  /**
+   * Decode token without verification
+   */
+  public decodeToken(token: string): TokenPayload | MFATokenPayload {
+    try {
+      return jwt.decode(token) as TokenPayload | MFATokenPayload;
+    } catch (error) {
+      logger.error('Token decode failed', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Create signed token
+   */
+  private createSignedToken(
+    payload: Record<string, any>,
+    secret: string,
+    options: jwt.SignOptions
+  ): string {
+    return jwt.sign(payload, secret, {
+      algorithm: 'HS512',
+      ...options,
+    });
+  }
+
+  /**
+   * Verify token signature
+   */
+  private verifyTokenSignature(
+    token: string,
+    secret: string
+  ): jwt.JwtPayload {
+    return jwt.verify(token, secret, {
+      algorithms: ['HS512'],
+    }) as jwt.JwtPayload;
+  }
+
+  /**
+   * Get token expiration time
+   */
+  public getTokenExpiration(token: string): Date {
+    const decoded = this.decodeToken(token);
+    return new Date((decoded as any).exp * 1000);
+  }
+
+  /**
+   * Check if token is expired
+   */
+  public isTokenExpired(token: string): boolean {
+    try {
+      const expiration = this.getTokenExpiration(token);
+      return expiration.getTime() < Date.now();
+    } catch (error) {
+      return true;
+    }
+  }
+
+  /**
+   * Generate token fingerprint
+   */
+  private generateTokenFingerprint(token: string): string {
+    return require('crypto')
+      .createHash('sha256')
+      .update(token)
+      .digest('hex');
+  }
+
+  /**
+   * Start token cleanup interval
+   */
+  public startCleanupInterval(intervalMs: number = 3600000): void {
+    setInterval(() => {
+      this.clearExpiredTokens();
+      logger.debug('Token cleanup completed');
+    }, intervalMs);
+  }
+}
+   */
+  public async generateTokens(
+    userId: string,
+    roles: UserRole[]
+  ): Promise<JWTTokens> {
+    try {
+      const accessToken = await this.createAccessToken(userId, roles);
+      const refreshToken = await this.createRefreshToken(userId);
+
+      return {
+        accessToken,
+        refreshToken,
+      };
+    } catch (error) {
+      logger.error('Failed to generate tokens', { error, userId });
+      throw error;
+    }
+  }
+
+  /**
+   * Create access token
+   */
+  private async createAccessToken(
+    userId: string,
+    roles: UserRole[]
+  ): Promise<string> {
+    const payload: TokenPayload = {
+      userId,
+      roles,
+      type: 'access',
+    };
+
+    return jwt.sign(payload, this.config.accessTokenSecret, {
+      expiresIn: this.config.accessTokenExpiry,
+      algorithm: 'HS512',
+    });
+  }
+
+  /**
+   * Create refresh token
+   */
+  private async createRefreshToken(userId: string): Promise<string> {
+    const payload: TokenPayload = {
+      userId,
+      type: 'refresh',
+    };
+
+    return jwt.sign(payload, this.config.refreshTokenSecret, {
+      expiresIn: this.config.refreshTokenExpiry,
+      algorithm: 'HS512',
+    });
+  }
+
+  /**
+   * Create MFA token
+   */
+  public async createMFAToken(
+    userId: string,
+    metadata?: Record<string, any>
+  ): Promise<string> {
+    const payload: MFATokenPayload = {
+      userId,
+      type: 'mfa',
+      ...metadata,
+    };
+
+    return jwt.sign(payload, this.config.mfaTokenSecret, {
+      expiresIn: this.config.mfaTokenExpiry,
+      algorithm: 'HS512',
+    });
+  }
+
+  /**
+   * Verify access token
+   */
+  public async verifyAccessToken(token: string): Promise<TokenPayload> {
+    try {
+      // Check if token is blacklisted
+      if (this.blacklistedTokens.has(token)) {
+        throw new Error('Token has been revoked');
+      }
+
+      const payload = jwt.verify(
+        token,
+        this.config.accessTokenSecret,
+        {
+          algorithms: ['HS512'],
+        }
+      ) as TokenPayload;
+
+      if (payload.type !== 'access') {
+        throw new Error('Invalid token type');
+      }
+
+      return payload;
+    } catch (error) {
+      if (error instanceof jwt.TokenExpiredError) {
+        logger.warn('Access token expired');
+        throw new Error('Token expired');
+      }
+      
+      logger.error('Access token verification failed', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Verify refresh token
+   */
+  public async verifyRefreshToken(token: string): Promise<TokenPayload> {
+    try {
+      const payload = jwt.verify(
+        token,
+        this.config.refreshTokenSecret,
+        {
+          algorithms: ['HS512'],
+        }
+      ) as TokenPayload;
+
+      if (payload.type !== 'refresh') {
+        throw new Error('Invalid token type');
+      }
+
+      return payload;
+    } catch (error) {
+      logger.error('Refresh token verification failed', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Verify MFA token
+   */
+  public async verifyMFAToken(token: string): Promise<MFATokenPayload> {
+    try {
+      const payload = jwt.verify(
+        token,
+        this.config.mfaTokenSecret,
+        {
+          algorithms: ['HS512'],
+        }
+      ) as MFATokenPayload;
+
+      if (payload.type !== 'mfa') {
+        throw new Error('Invalid token type');
+      }
+
+      return payload;
+    } catch (error) {
+      logger.error('MFA token verification failed', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Refresh access and refresh

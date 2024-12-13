@@ -1,0 +1,246 @@
+import React, { useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useForm } from '@/hooks/useForm';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import {
+  AlertOctagon,
+  AlertTriangle,
+  XCircle,
+  CheckCircle2,
+  RefreshCw,
+  Download,
+} from 'lucide-react';
+
+interface ErrorLog {
+  id: string;
+  timestamp: number;
+  type: 'validation' | 'runtime' | 'network' | 'security';
+  message: string;
+  field?: string;
+  stackTrace?: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+}
+
+const ErrorTracker: React.FC = () => {
+  const { state } = useForm();
+  const [errorLogs, setErrorLogs] = useState<ErrorLog[]>([]);
+  const [activeFilters, setActiveFilters] = useState<string[]>([]);
+
+  useEffect(() => {
+    // Track validation errors
+    const validationErrors = Object.entries(state.fields)
+      .filter(([_, field]) => field.error)
+      .map(([name, field]): ErrorLog => ({
+        id: `${name}-${Date.now()}`,
+        timestamp: Date.now(),
+        type: 'validation',
+        message: field.error || 'Validation failed',
+        field: name,
+        severity: 'medium',
+      }));
+
+    if (validationErrors.length > 0) {
+      setErrorLogs(prev => [...validationErrors, ...prev]);
+    }
+  }, [state]);
+
+  const handleRuntimeError = (error: Error) => {
+    const newError: ErrorLog = {
+      id: `runtime-${Date.now()}`,
+      timestamp: Date.now(),
+      type: 'runtime',
+      message: error.message,
+      stackTrace: error.stack,
+      severity: 'high',
+    };
+    setErrorLogs(prev => [newError, ...prev]);
+  };
+
+  const getSeverityColor = (severity: ErrorLog['severity']): string => {
+    switch (severity) {
+      case 'low':
+        return 'text-blue-500';
+      case 'medium':
+        return 'text-yellow-500';
+      case 'high':
+        return 'text-orange-500';
+      case 'critical':
+        return 'text-red-500';
+      default:
+        return 'text-gray-500';
+    }
+  };
+
+  const getErrorIcon = (type: ErrorLog['type']) => {
+    switch (type) {
+      case 'validation':
+        return <AlertTriangle className="w-4 h-4" />;
+      case 'runtime':
+        return <AlertOctagon className="w-4 h-4" />;
+      case 'network':
+        return <RefreshCw className="w-4 h-4" />;
+      case 'security':
+        return <XCircle className="w-4 h-4" />;
+      default:
+        return null;
+    }
+  };
+
+  const clearErrors = () => {
+    setErrorLogs([]);
+  };
+
+  const downloadErrorReport = () => {
+    const report = {
+      timestamp: new Date().toISOString(),
+      formState: state,
+      errors: errorLogs,
+    };
+
+    const blob = new Blob([JSON.stringify(report, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `error-report-${new Date().toISOString()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const toggleFilter = (type: ErrorLog['type']) => {
+    setActiveFilters(prev =>
+      prev.includes(type)
+        ? prev.filter(f => f !== type)
+        : [...prev, type]
+    );
+  };
+
+  const filteredLogs = activeFilters.length > 0
+    ? errorLogs.filter(log => activeFilters.includes(log.type))
+    : errorLogs;
+
+  return (
+    <Card className="w-full">
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="flex items-center gap-2">
+            <AlertOctagon className="w-5 h-5" />
+            Error Tracker
+          </CardTitle>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={clearErrors}
+              disabled={errorLogs.length === 0}
+            >
+              <XCircle className="w-4 h-4 mr-2" />
+              Clear
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={downloadErrorReport}
+              disabled={errorLogs.length === 0}
+            >
+              <Download className="w-4 h-4 mr-2" />
+              Export
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="flex gap-2 mb-4">
+          {['validation', 'runtime', 'network', 'security'].map((type) => (
+            <Button
+              key={type}
+              variant={activeFilters.includes(type) ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => toggleFilter(type as ErrorLog['type'])}
+            >
+              {type}
+            </Button>
+          ))}
+        </div>
+
+        <div className="space-y-4">
+          <AnimatePresence mode="popLayout">
+            {filteredLogs.length === 0 ? (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="flex items-center justify-center p-8"
+              >
+                <div className="flex items-center gap-2 text-gray-500">
+                  <CheckCircle2 className="w-5 h-5" />
+                  <span>No errors detected</span>
+                </div>
+              </motion.div>
+            ) : (
+              filteredLogs.map((log) => (
+                <motion.div
+                  key={log.id}
+                  layout
+                  initial={{ opacity: 0, y: -20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 20 }}
+                >
+                  <Alert className="border-l-4" style={{
+                    borderLeftColor: getSeverityColor(log.severity).replace('text-', 'rgb(')
+                  }}>
+                    <div className="flex items-start gap-2">
+                      <span className={getSeverityColor(log.severity)}>
+                        {getErrorIcon(log.type)}
+                      </span>
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium">
+                            {log.field ? `${log.field}: ` : ''}{log.message}
+                          </span>
+                          <span className="text-xs text-gray-500">
+                            {new Date(log.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        {log.stackTrace && (
+                          <AlertDescription className="mt-2 text-xs font-mono whitespace-pre-wrap">
+                            {log.stackTrace}
+                          </AlertDescription>
+                        )}
+                      </div>
+                    </div>
+                  </Alert>
+                </motion.div>
+              ))
+            )}
+          </AnimatePresence>
+        </div>
+
+        {errorLogs.length > 0 && (
+          <div className="mt-4 p-4 rounded-lg bg-gray-100 dark:bg-gray-800">
+            <h4 className="text-sm font-medium mb-2">Error Summary</h4>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {Object.entries(
+                errorLogs.reduce((acc, log) => ({
+                  ...acc,
+                  [log.type]: (acc[log.type] || 0) + 1
+                }), {} as Record<string, number>)
+              ).map(([type, count]) => (
+                <div key={type} className="text-sm">
+                  <span className="font-medium">{type}:</span> {count}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+};
+
+export default ErrorTracker;

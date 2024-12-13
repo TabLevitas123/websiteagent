@@ -1,0 +1,427 @@
+import { IMetric } from '@/models/metric';
+import { logger } from '@/utils/logger';
+import { EventEmitter } from 'events';
+import { MetricsService } from './metrics.service';
+import { MetricsAggregationService } from './metrics-aggregation.service';
+
+interface TrendAnalysis {
+  type: string;
+  trend: 'increasing' | 'decreasing' | 'stable';
+  confidence: number;
+  slope: number;
+  rSquared: number;
+  forecast: {
+    next24h: number;
+    next7d: number;
+    next30d: number;
+  };
+  seasonality?: {
+    daily?: boolean;
+    weekly?: boolean;
+    monthly?: boolean;
+    pattern?: 'daily' | 'weekly' | 'monthly' | 'none';
+  };
+}
+
+interface Correlation {
+  typeA: string;
+  typeB: string;
+  coefficient: number;
+  significance: number;
+}
+
+interface MetricPattern {
+  type: string;
+  pattern: 'spike' | 'dip' | 'cycle' | 'trend' | 'outlier';
+  confidence: number;
+  startTime: number;
+  endTime: number;
+  magnitude: number;
+  frequency?: number;
+}
+
+interface AnalysisOptions {
+  minConfidence?: number;
+  maxPatterns?: number;
+  forecastHorizon?: number;
+  seasonalityCheck?: boolean;
+}
+
+export class MetricsAnalysisService extends EventEmitter {
+  private readonly metricsService: MetricsService;
+  private readonly aggregationService: MetricsAggregationService;
+
+  constructor(
+    metricsService: MetricsService,
+    aggregationService: MetricsAggregationService
+  ) {
+    super();
+    this.metricsService = metricsService;
+    this.aggregationService = aggregationService;
+  }
+
+  /**
+   * Analyze trends in metrics
+   */
+  public async analyzeTrends(
+    start: number,
+    end: number,
+    types?: string[],
+    options: AnalysisOptions = {}
+  ): Promise<TrendAnalysis[]> {
+    try {
+      const metrics = await this.metricsService.getMetrics(start, end, types);
+      const results: TrendAnalysis[] = [];
+
+      // Group metrics by type
+      const groupedMetrics = new Map<string, IMetric[]>();
+      metrics.forEach(metric => {
+        if (!groupedMetrics.has(metric.type)) {
+          groupedMetrics.set(metric.type, []);
+        }
+        groupedMetrics.get(metric.type)?.push(metric);
+      });
+
+      // Analyze each type
+      for (const [type, typeMetrics] of groupedMetrics.entries()) {
+        // Sort by timestamp
+        typeMetrics.sort((a, b) => a.timestamp - b.timestamp);
+
+        // Linear regression
+        const regression = this.calculateLinearRegression(typeMetrics);
+
+        // Calculate seasonality
+        const seasonality = options.seasonalityCheck ?
+          await this.detectSeasonality(typeMetrics) :
+          undefined;
+
+        // Calculate seasonality
+        const seasonality = options.seasonalityCheck ?
+          await this.detectSeasonality(typeMetrics) :
+          undefined;
+
+        // Calculate forecast
+        const forecast = this.calculateForecast(typeMetrics, regression);
+
+        const analysis: TrendAnalysis = {
+          type,
+          trend: regression.slope > 0.01 ? 'increasing' :
+                 regression.slope < -0.01 ? 'decreasing' : 'stable',
+          confidence: regression.rSquared * 100,
+          slope: regression.slope,
+          rSquared: regression.rSquared,
+          forecast,
+          seasonality
+        };
+
+        results.push(analysis);
+      }
+
+      logger.info('Trend analysis completed', {
+        start,
+        end,
+        types,
+        analysisCount: results.length
+      });
+
+      return results;
+
+    } catch (error) {
+      logger.error('Failed to analyze trends', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Detect correlations between metric types
+   */
+  public async detectCorrelations(
+    start: number,
+    end: number,
+    types?: string[],
+    options: AnalysisOptions = {}
+  ): Promise<Correlation[]> {
+    try {
+      const metrics = await this.metricsService.getMetrics(start, end, types);
+      const results: Correlation[] = [];
+
+      // Group metrics by type
+      const groupedMetrics = new Map<string, IMetric[]>();
+      metrics.forEach(metric => {
+        if (!groupedMetrics.has(metric.type)) {
+          groupedMetrics.set(metric.type, []);
+        }
+        groupedMetrics.get(metric.type)?.push(metric);
+      });
+
+      // Calculate correlations between all pairs
+      const types = Array.from(groupedMetrics.keys());
+      for (let i = 0; i < types.length; i++) {
+        for (let j = i + 1; j < types.length; j++) {
+          const typeA = types[i];
+          const typeB = types[j];
+
+          const correlation = this.calculateCorrelation(
+            groupedMetrics.get(typeA) || [],
+            groupedMetrics.get(typeB) || []
+          );
+
+          if (Math.abs(correlation.coefficient) > (options.minConfidence || 0.5)) {
+            results.push(correlation);
+          }
+        }
+      }
+
+      logger.info('Correlation analysis completed', {
+        start,
+        end,
+        types,
+        correlationsFound: results.length
+      });
+
+      return results;
+
+    } catch (error) {
+      logger.error('Failed to detect correlations', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Detect patterns in metrics
+   */
+  public async detectPatterns(
+    start: number,
+    end: number,
+    types?: string[],
+    options: AnalysisOptions = {}
+  ): Promise<MetricPattern[]> {
+    try {
+      const metrics = await this.metricsService.getMetrics(start, end, types);
+      const patterns: MetricPattern[] = [];
+
+      // Group metrics by type
+      const groupedMetrics = new Map<string, IMetric[]>();
+      metrics.forEach(metric => {
+        if (!groupedMetrics.has(metric.type)) {
+          groupedMetrics.set(metric.type, []);
+        }
+        groupedMetrics.get(metric.type)?.push(metric);
+      });
+
+      for (const [type, typeMetrics] of groupedMetrics.entries()) {
+        // Sort by timestamp
+        typeMetrics.sort((a, b) => a.timestamp - b.timestamp);
+
+        // Detect spikes and dips
+        const volatilityPatterns = this.detectVolatilityPatterns(typeMetrics);
+        patterns.push(...volatilityPatterns);
+
+        // Detect cycles
+        const cyclePatterns = await this.detectCyclePatterns(typeMetrics);
+        patterns.push(...cyclePatterns);
+
+        // Detect trends
+        const trendPatterns = this.detectTrendPatterns(typeMetrics);
+        patterns.push(...trendPatterns);
+
+        // Detect outliers
+        const outlierPatterns = await this.detectOutlierPatterns(typeMetrics);
+        patterns.push(...outlierPatterns);
+      }
+
+      // Filter by confidence and limit number of patterns
+      const filteredPatterns = patterns
+        .filter(p => p.confidence >= (options.minConfidence || 0.7))
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, options.maxPatterns || patterns.length);
+
+      logger.info('Pattern detection completed', {
+        start,
+        end,
+        types,
+        patternsFound: filteredPatterns.length
+      });
+
+      return filteredPatterns;
+
+    } catch (error) {
+      logger.error('Failed to detect patterns', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Calculate linear regression
+   */
+  private calculateLinearRegression(metrics: IMetric[]): {
+    slope: number;
+    intercept: number;
+    rSquared: number;
+  } {
+    const n = metrics.length;
+    if (n < 2) return { slope: 0, intercept: 0, rSquared: 0 };
+
+    const xValues = metrics.map(m => m.timestamp);
+    const yValues = metrics.map(m => m.value);
+
+    const sumX = xValues.reduce((a, b) => a + b, 0);
+    const sumY = yValues.reduce((a, b) => a + b, 0);
+    const sumXY = xValues.reduce((sum, x, i) => sum + x * yValues[i], 0);
+    const sumXX = xValues.reduce((sum, x) => sum + x * x, 0);
+
+    const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+    const intercept = (sumY - slope * sumX) / n;
+
+    // Calculate R-squared
+    const yMean = sumY / n;
+    const totalSS = yValues.reduce((sum, y) => sum + Math.pow(y - yMean, 2), 0);
+    const regressionSS = yValues.reduce((sum, y, i) => {
+      const yPred = slope * xValues[i] + intercept;
+      return sum + Math.pow(yPred - yMean, 2);
+    }, 0);
+    const rSquared = regressionSS / totalSS;
+
+    return { slope, intercept, rSquared };
+  }
+
+  /**
+   * Calculate correlation between two metric series
+   */
+  private calculateCorrelation(
+    metricsA: IMetric[],
+    metricsB: IMetric[]
+  ): Correlation {
+    // Align timestamps
+    const alignedMetrics = this.alignMetricTimestamps(metricsA, metricsB);
+    if (alignedMetrics.length < 2) {
+      return {
+        typeA: metricsA[0]?.type || 'unknown',
+        typeB: metricsB[0]?.type || 'unknown',
+        coefficient: 0,
+        significance: 0
+      };
+    }
+
+    const [seriesA, seriesB] = alignedMetrics;
+
+    // Calculate Pearson correlation coefficient
+    const n = seriesA.length;
+    const meanA = seriesA.reduce((a, b) => a + b, 0) / n;
+    const meanB = seriesB.reduce((a, b) => a + b, 0) / n;
+
+    let sumCov = 0;
+    let sumVarA = 0;
+    let sumVarB = 0;
+
+    for (let i = 0; i < n; i++) {
+      const diffA = seriesA[i] - meanA;
+      const diffB = seriesB[i] - meanB;
+      sumCov += diffA * diffB;
+      sumVarA += diffA * diffA;
+      sumVarB += diffB * diffB;
+    }
+
+    const coefficient = sumCov / Math.sqrt(sumVarA * sumVarB);
+    
+    // Calculate significance using t-test
+    const t = coefficient * Math.sqrt((n - 2) / (1 - coefficient * coefficient));
+    const significance = 1 - this.tDistribution(Math.abs(t), n - 2);
+
+    return {
+      typeA: metricsA[0]?.type || 'unknown',
+      typeB: metricsB[0]?.type || 'unknown',
+      coefficient,
+      significance
+    };
+  }
+
+  /**
+   * Detect seasonality in metrics
+   */
+  private async detectSeasonality(
+    metrics: IMetric[]
+  ): Promise<TrendAnalysis['seasonality']> {
+    const values = metrics.map(m => m.value);
+    const timestamps = metrics.map(m => m.timestamp);
+
+    // Check for daily patterns
+    const dailyPattern = this.checkSeasonalPattern(values, timestamps, 24 * 60 * 60 * 1000);
+
+    // Check for weekly patterns
+    const weeklyPattern = this.checkSeasonalPattern(values, timestamps, 7 * 24 * 60 * 60 * 1000);
+
+    // Check for monthly patterns
+    const monthlyPattern = this.checkSeasonalPattern(values, timestamps, 30 * 24 * 60 * 60 * 1000);
+
+    return {
+      daily: dailyPattern > 0.7,
+      weekly: weeklyPattern > 0.7,
+      monthly: monthlyPattern > 0.7,
+      pattern: dailyPattern > 0.7 ? 'daily' :
+               weeklyPattern > 0.7 ? 'weekly' :
+               monthlyPattern > 0.7 ? 'monthly' : 'none'
+    };
+  }
+
+  /**
+   * Check for seasonal pattern at given interval
+   */
+  private checkSeasonalPattern(
+    values: number[],
+    timestamps: number[],
+    interval: number
+  ): number {
+    const n = values.length;
+    if (n < interval * 2) return 0;
+
+    let correlation = 0;
+    let count = 0;
+
+    for (let i = 0; i < n - interval; i++) {
+      const current = values[i];
+      const next = values[i + interval];
+      
+      if (timestamps[i + interval] - timestamps[i] === interval) {
+        correlation += current * next;
+        count++;
+      }
+    }
+
+    return count > 0 ? correlation / count : 0;
+  }
+
+  /**
+   * Calculate forecast values
+   */
+  private calculateForecast(
+    metrics: IMetric[],
+    regression: { slope: number; intercept: number }
+  ): TrendAnalysis['forecast'] {
+    const lastTimestamp = metrics[metrics.length - 1].timestamp;
+    const { slope, intercept } = regression;
+
+    return {
+      next24h: slope * (lastTimestamp + 24 * 60 * 60 * 1000) + intercept,
+      next7d: slope * (lastTimestamp + 7 * 24 * 60 * 60 * 1000) + intercept,
+      next30d: slope * (lastTimestamp + 30 * 24 * 60 * 60 * 1000) + intercept
+    };
+  }
+
+  /**
+   * Student's t-distribution
+   */
+  private tDistribution(t: number, df: number): number {
+    const x = df / (df + t * t);
+    let result = 1;
+
+    // Beta function approximation
+    for (let i = 1; i <= df / 2; i++) {
+      result *= x;
+    }
+
+    return 1 - 0.5 * result;
+  }
+}
+
+export default MetricsAnalysisService;

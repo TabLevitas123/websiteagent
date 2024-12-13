@@ -1,0 +1,63 @@
+import { Model } from 'mongoose';
+import { MetricModel, IMetric } from '@/models/metric';
+import { logger } from '@/utils/logger';
+import { Redis } from 'ioredis';
+import { EventEmitter } from 'events';
+
+interface MetricAggregates {
+  count: number;
+  min: number;
+  max: number;
+  avg: number;
+  sum: number;
+  variance: number;
+  stdDev: number;
+}
+
+interface MetricQuery {
+  start: number;
+  end: number;
+  types?: string[];
+}
+
+interface AggregateOptions {
+  interval?: number;
+  functions?: Array<keyof MetricAggregates>;
+}
+
+export class MetricsService extends EventEmitter {
+  private readonly model: Model<IMetric>;
+  private readonly redis: Redis;
+  private readonly retentionPeriod: number;
+
+  constructor() {
+    super();
+    this.model = MetricModel;
+    this.redis = new Redis(process.env.REDIS_URL);
+    this.retentionPeriod = parseInt(process.env.METRICS_RETENTION_DAYS || '30') * 24 * 60 * 60 * 1000;
+
+    // Set up cleanup interval
+    setInterval(() => this.cleanupOldMetrics(), 24 * 60 * 60 * 1000); // Daily cleanup
+  }
+
+  /**
+   * Store new metrics
+   */
+  public async storeMetrics(metrics: Omit<IMetric, '_id'>[]): Promise<void> {
+    try {
+      // Batch insert metrics
+      await this.model.insertMany(metrics, { ordered: false });
+
+      // Emit metrics stored event
+      this.emit('metricsStored', {
+        count: metrics.length,
+        timestamp: Date.now()
+      });
+
+      // Update cache for affected time ranges
+      await this.invalidateMetricsCache(metrics);
+
+      logger.info('Metrics stored successfully', {
+        count: metrics.length,
+        types: [...new Set(metrics.map(m => m.type))]
+      

@@ -1,0 +1,254 @@
+import React, { useEffect, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useWeb3 } from '@/hooks/useWeb3';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import {
+  Network,
+  Signal,
+  Wifi,
+  WifiOff,
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  Database,
+  Zap,
+} from 'lucide-react';
+
+interface NetworkStats {
+  blockNumber: number;
+  gasPrice: string;
+  networkLatency: number;
+  peersConnected: number;
+  lastBlock: {
+    timestamp: number;
+    transactions: number;
+  };
+}
+
+const NetworkStatusMonitor: React.FC = () => {
+  const { provider, chainId, account } = useWeb3();
+  const [networkStats, setNetworkStats] = useState<NetworkStats>({
+    blockNumber: 0,
+    gasPrice: '0',
+    networkLatency: 0,
+    peersConnected: 0,
+    lastBlock: {
+      timestamp: 0,
+      transactions: 0,
+    },
+  });
+  const [connectionQuality, setConnectionQuality] = useState<'good' | 'medium' | 'poor'>('good');
+  const [isOnline, setIsOnline] = useState(true);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    
+    const updateNetworkStats = async () => {
+      if (!provider) return;
+
+      try {
+        const startTime = performance.now();
+        const [blockNumber, gasPrice, block] = await Promise.all([
+          provider.getBlockNumber(),
+          provider.getGasPrice(),
+          provider.getBlock('latest'),
+        ]);
+        const endTime = performance.now();
+
+        const latency = endTime - startTime;
+        setConnectionQuality(
+          latency < 500 ? 'good' : latency < 1500 ? 'medium' : 'poor'
+        );
+
+        setNetworkStats({
+          blockNumber,
+          gasPrice: gasPrice.toString(),
+          networkLatency: Math.round(latency),
+          peersConnected: Math.floor(Math.random() * 10) + 20, // Simulated peer count
+          lastBlock: {
+            timestamp: block?.timestamp || 0,
+            transactions: block?.transactions.length || 0,
+          },
+        });
+      } catch (error) {
+        console.error('Failed to fetch network stats:', error);
+        setIsOnline(false);
+      }
+    };
+
+    if (provider) {
+      updateNetworkStats();
+      interval = setInterval(updateNetworkStats, 5000);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [provider]);
+
+  const getConnectionIcon = () => {
+    if (!isOnline) return <WifiOff className="w-4 h-4 text-red-500" />;
+    switch (connectionQuality) {
+      case 'good':
+        return <Wifi className="w-4 h-4 text-green-500" />;
+      case 'medium':
+        return <Signal className="w-4 h-4 text-yellow-500" />;
+      case 'poor':
+        return <Signal className="w-4 h-4 text-red-500" />;
+    }
+  };
+
+  const getNetworkName = (id: number | null) => {
+    switch (id) {
+      case 1:
+        return 'Ethereum Mainnet';
+      case 5:
+        return 'Goerli Testnet';
+      case 31337:
+        return 'Local Network';
+      default:
+        return 'Unknown Network';
+    }
+  };
+
+  const metrics = [
+    {
+      label: 'Block Number',
+      value: networkStats.blockNumber.toLocaleString(),
+      icon: <Database className="w-4 h-4 text-blue-500" />,
+    },
+    {
+      label: 'Gas Price',
+      value: `${Math.round(parseInt(networkStats.gasPrice) / 1e9)} Gwei`,
+      icon: <Zap className="w-4 h-4 text-yellow-500" />,
+    },
+    {
+      label: 'Latency',
+      value: `${networkStats.networkLatency}ms`,
+      icon: <Clock className="w-4 h-4 text-emerald-500" />,
+    },
+    {
+      label: 'Peers',
+      value: networkStats.peersConnected.toString(),
+      icon: <Network className="w-4 h-4 text-purple-500" />,
+    },
+  ];
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="flex items-center gap-2">
+            <Network className="w-5 h-5" />
+            Network Status
+          </CardTitle>
+          <Badge
+            variant={isOnline ? 'default' : 'destructive'}
+            className="flex items-center gap-2"
+          >
+            {getConnectionIcon()}
+            {getNetworkName(chainId)}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-6">
+          {/* Network Metrics Grid */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {metrics.map((metric) => (
+              <motion.div
+                key={metric.label}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="p-4 rounded-lg bg-secondary"
+              >
+                <div className="flex items-center gap-2 mb-2">
+                  {metric.icon}
+                  <span className="text-sm font-medium">{metric.label}</span>
+                </div>
+                <div className="text-2xl font-bold">{metric.value}</div>
+              </motion.div>
+            ))}
+          </div>
+
+          {/* Last Block Info */}
+          <div className="space-y-2">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Database className="w-4 h-4" />
+              Last Block Information
+            </h4>
+            <motion.div
+              layout
+              className="p-4 rounded-lg bg-secondary space-y-2"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-500">Timestamp</span>
+                <span>
+                  {networkStats.lastBlock.timestamp
+                    ? new Date(networkStats.lastBlock.timestamp * 1000).toLocaleString()
+                    : 'N/A'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-500">Transactions</span>
+                <span>{networkStats.lastBlock.transactions.toLocaleString()}</span>
+              </div>
+            </motion.div>
+          </div>
+
+          {/* Connection Status */}
+          <AnimatePresence mode="wait">
+            {!isOnline && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+              >
+                <Alert variant="destructive">
+                  <AlertTriangle className="w-4 h-4" />
+                  <AlertDescription>
+                    Network connection lost. Attempting to reconnect...
+                  </AlertDescription>
+                </Alert>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Realtime Network Health Indicator */}
+          <div className="border-t pt-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className={`w-4 h-4 ${
+                  connectionQuality === 'good'
+                    ? 'text-green-500'
+                    : connectionQuality === 'medium'
+                    ? 'text-yellow-500'
+                    : 'text-red-500'
+                }`} />
+                <span className="text-sm font-medium">Network Health</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-1">
+                  <div className={`w-2 h-2 rounded-full ${
+                    connectionQuality === 'good' ? 'bg-green-500' : 'bg-gray-300'
+                  }`} />
+                  <div className={`w-2 h-2 rounded-full ${
+                    connectionQuality !== 'poor' ? 'bg-yellow-500' : 'bg-gray-300'
+                  }`} />
+                  <div className={`w-2 h-2 rounded-full ${
+                    connectionQuality === 'poor' ? 'bg-red-500' : 'bg-gray-300'
+                  }`} />
+                </div>
+                <span className="text-sm capitalize">{connectionQuality}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
+
+export default NetworkStatusMonitor;

@@ -1,0 +1,230 @@
+import { ethers } from 'ethers';
+import { logger } from '@/utils/logger';
+import {
+  TransactionConfig,
+  NetworkConfig,
+  GasEstimate,
+  TransactionReceipt,
+  NetworkStatus
+} from '@/types';
+
+export class EthereumService {
+  private provider: ethers.providers.Web3Provider;
+  private networkConfig: NetworkConfig;
+  private metrics: Map<string, any> = new Map();
+
+  constructor(provider: ethers.providers.Web3Provider, config: NetworkConfig) {
+    this.provider = provider;
+    this.networkConfig = config;
+    this.setupEventListeners();
+
+    logger.info('EthereumService initialized', {
+      network: provider.network.name,
+      chainId: provider.network.chainId,
+    });
+  }
+
+  /**
+   * Set up blockchain event listeners
+   */
+  private setupEventListeners(): void {
+    this.provider.on('block', (blockNumber: number) => {
+      logger.debug('New block', { blockNumber });
+      this.updateNetworkMetrics();
+    });
+
+    this.provider.on('error', (error: Error) => {
+      logger.error('Provider error', { error });
+    });
+
+    this.provider.on('network', (newNetwork: ethers.providers.Network, oldNetwork: ethers.providers.Network) => {
+      logger.info('Network changed', {
+        from: oldNetwork?.name,
+        to: newNetwork.name,
+      });
+    });
+  }
+
+  /**
+   * Get current network status and metrics
+   */
+  public async getNetworkStatus(): Promise<NetworkStatus> {
+    try {
+      const [
+        network,
+        blockNumber,
+        gasPrice,
+        latency
+      ] = await Promise.all([
+        this.provider.getNetwork(),
+        this.provider.getBlockNumber(),
+        this.provider.getGasPrice(),
+        this.measureNetworkLatency(),
+      ]);
+
+      const status: NetworkStatus = {
+        name: network.name,
+        chainId: network.chainId,
+        blockNumber,
+        gasPrice: gasPrice.toString(),
+        latency,
+        isConnected: true,
+        timestamp: new Date().toISOString(),
+      };
+
+      logger.debug('Network status updated', status);
+      return status;
+    } catch (error) {
+      logger.error('Failed to get network status', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Estimate gas for a transaction
+   */
+  public async estimateGas(
+    to: string,
+    data: string,
+    value: string = '0'
+  ): Promise<GasEstimate> {
+    try {
+      const [gasLimit, gasPrice, maxFeePerGas, maxPriorityFeePerGas] = await Promise.all([
+        this.provider.estimateGas({
+          to,
+          data,
+          value: ethers.utils.parseEther(value),
+        }),
+        this.provider.getGasPrice(),
+        this.provider.getFeeData().then(data => data.maxFeePerGas),
+        this.provider.getFeeData().then(data => data.maxPriorityFeePerGas),
+      ]);
+
+      const estimate: GasEstimate = {
+        gasLimit: gasLimit.toString(),
+        gasPrice: gasPrice.toString(),
+        maxFeePerGas: maxFeePerGas?.toString() || null,
+        maxPriorityFeePerGas: maxPriorityFeePerGas?.toString() || null,
+        estimatedCostWei: gasLimit.mul(gasPrice).toString(),
+        estimatedCostEth: ethers.utils.formatEther(gasLimit.mul(gasPrice)),
+      };
+
+      logger.debug('Gas estimation', estimate);
+      return estimate;
+    } catch (error) {
+      logger.error('Gas estimation failed', { error, to, data });
+      throw error;
+    }
+  }
+
+  /**
+   * Send transaction with optimal gas settings
+   */
+  public async sendTransaction(config: TransactionConfig): Promise<TransactionReceipt> {
+    try {
+      const signer = this.provider.getSigner();
+      
+      // Get gas estimates
+      const gasEstimate = await this.estimateGas(
+        config.to,
+        config.data,
+        config.value
+      );
+
+      // Prepare transaction
+      const tx = await signer.sendTransaction({
+        to: config.to,
+        data: config.data,
+        value: config.value ? ethers.utils.parseEther(config.value) : 0,
+        gasLimit: ethers.BigNumber.from(gasEstimate.gasLimit)
+          .mul(120)
+          .div(100), // Add 20% buffer
+        gasPrice: ethers.BigNumber.from(gasEstimate.gasPrice),
+        nonce: await this.provider.getTransactionCount(await signer.getAddress()),
+      });
+
+      logger.info('Transaction sent', {
+        hash: tx.hash,
+        to: config.to,
+        value: config.value,
+      });
+
+      // Wait for confirmation
+      const receipt = await tx.wait();
+
+      // Process transaction receipt
+      const processedReceipt: TransactionReceipt = {
+        hash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        blockHash: receipt.blockHash,
+        from: receipt.from,
+        to: receipt.to,
+        status: receipt.status === 1,
+        gasUsed: receipt.gasUsed.toString(),
+        effectiveGasPrice: receipt.effectiveGasPrice.toString(),
+        logs: receipt.logs,
+        confirmations: receipt.confirmations,
+        timestamp: new Date().toISOString(),
+      };
+
+      logger.info('Transaction confirmed', {
+        hash: processedReceipt.hash,
+        status: processedReceipt.status,
+        blockNumber: processedReceipt.blockNumber,
+      });
+
+      return processedReceipt;
+    } catch (error) {
+      logger.error('Transaction failed', { error, config });
+      throw error;
+    }
+  }
+
+  /**
+   * Measure network latency
+   */
+  private async measureNetworkLatency(): Promise<number> {
+    const start = performance.now();
+    await this.provider.getBlockNumber();
+    return Math.round(performance.now() - start);
+  }
+
+  /**
+   * Update network metrics
+   */
+  private async updateNetworkMetrics(): void {
+    try {
+      const [
+        blockNumber,
+        gasPrice,
+        block
+      ] = await Promise.all([
+        this.provider.getBlockNumber(),
+        this.provider.getGasPrice(),
+        this.provider.getBlock('latest'),
+      ]);
+
+      this.metrics.set('blockNumber', blockNumber);
+      this.metrics.set('gasPrice', gasPrice.toString());
+      this.metrics.set('blockTimestamp', block.timestamp);
+      this.metrics.set('transactions', block.transactions.length);
+
+      logger.debug('Network metrics updated', {
+        blockNumber,
+        gasPrice: gasPrice.toString(),
+        transactions: block.transactions.length,
+      });
+    } catch (error) {
+      logger.error('Failed to update network metrics', { error });
+    }
+  }
+
+  /**
+   * Get network metrics
+   */
+  public getMetrics(): Map<string, any> {
+    return this.metrics;
+  }
+
+  /**
+   * Clear store

@@ -1,0 +1,541 @@
+import { Server } from 'ws';
+import { Redis } from 'ioredis';
+import { MetricsService } from '@/services/metrics';
+import { WebSocketManager } from '../src/services/websocket/WebSocketManager';
+import { WebSocketEventHandler } from '../src/services/websocket/WebSocketEventHandler';
+import { WebSocketMetricsPublisher } from '../src/services/websocket/WebSocketMetricsPublisher';
+import { WebSocketSubscriptionManager } from '../src/services/websocket/WebSocketSubscriptionManager';
+
+describe('WebSocket Integration Tests', () => {
+  let wsManager: WebSocketManager;
+  let metricsService: MetricsService;
+  let redis: Redis;
+  let mockClients: WebSocket[] = [];
+  
+  const simulateMobileNetwork = () => {
+    // Simulate 3G network conditions
+    return new Promise(resolve => setTimeout(resolve, 100));
+  };
+  
+  beforeAll(async () => {
+    // Initialize Redis
+    redis = new Redis({
+      host: process.env.REDIS_HOST || 'localhost',
+      port: parseInt(process.env.REDIS_PORT || '6379'),
+      db: 1 // Use different DB for tests
+    });
+
+    // Initialize metrics service
+    metricsService = new MetricsService();
+
+    // Initialize WebSocket manager
+    wsManager = new WebSocketManager({
+      port: 8081,
+      path: '/ws-test',
+      maxClients: 100,
+      heartbeatInterval: 1000,
+      rateLimits: {
+        messages: 50,
+        subscriptions: 20,
+        timeWindow: 10000
+      }
+    }, metricsService);
+
+    // Wait for server to start
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  });
+
+  afterAll(async () => {
+    // Cleanup
+    await wsManager.close();
+    await redis.quit();
+    mockClients.forEach(client => client.close());
+  });
+
+  beforeEach(() => {
+    mockClients = [];
+  });
+
+  afterEach(() => {
+    mockClients.forEach(client => client.close());
+  });
+
+  const createClient = (auth = true): Promise<WebSocket> => {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:8081/ws-test`, {
+        headers: auth ? {
+          'Authorization': 'Bearer test-token'
+        } : {}
+      });
+
+      ws.on('open', () => {
+        mockClients.push(ws);
+        resolve(ws);
+      });
+
+      ws.on('error', reject);
+    });
+  };
+
+  describe('Connection Management', () => {
+    test('should connect with valid authentication on mobile network', async () => {
+      await simulateMobileNetwork();
+      const client = await createClient();
+      expect(client.readyState).toBe(WebSocket.OPEN);
+    });
+
+    test('should reject connection without authentication', async () => {
+      await expect(createClient(false)).rejects.toThrow();
+    });
+
+    test('should enforce connection limits', async () => {
+      // Create max allowed connections
+      const maxConnections = 100;
+      const clients = await Promise.all(
+        Array(maxConnections).fill(0).map(() => createClient())
+      );
+      expect(clients).toHaveLength(maxConnections);
+
+      // Next connection should fail
+      await expect(createClient()).rejects.toThrow();
+    });
+
+    test('should handle client disconnection gracefully', async () => {
+      const client = await createClient();
+      client.close();
+      
+      // Wait for cleanup
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      const stats = wsManager.getStats();
+      expect(stats.clientCount).toBe(0);
+    });
+  });
+
+  describe('Message Handling', () => {
+    test('should handle subscription messages', async () => {
+      const client = await createClient();
+      
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'subscribed') {
+            expect(message.channel).toBe('test-channel');
+            resolve(undefined);
+          }
+        });
+
+        client.send(JSON.stringify({
+          type: 'subscribe',
+        channel: 'test-channel'
+      }));
+
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'error' && message.data.message.includes('rate limit')) {
+            resolve(undefined);
+          }
+        });
+      });
+    });
+  });
+
+  describe('Pattern Subscriptions', () => {
+    test('should handle wildcard pattern subscriptions', async () => {
+      const client = await createClient();
+      
+      // Subscribe to pattern
+      client.send(JSON.stringify({
+        type: 'subscribe',
+        channel: 'metrics:*'
+      }));
+
+      return new Promise((resolve) => {
+        let messageCount = 0;
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'metrics') {
+            messageCount++;
+            if (messageCount >= 2) {
+              resolve(undefined);
+            }
+          }
+        });
+
+        // Publish to different channels matching pattern
+        metricsService.publish({
+          type: 'metrics:system',
+          value: 42,
+          timestamp: Date.now()
+        });
+
+        metricsService.publish({
+          type: 'metrics:application',
+          value: 84,
+          timestamp: Date.now()
+        });
+      });
+    });
+
+    test('should handle multiple pattern subscriptions', async () => {
+      const client = await createClient();
+      
+      // Subscribe to multiple patterns
+      client.send(JSON.stringify({
+        type: 'subscribe',
+        channel: 'metrics:system:*'
+      }));
+
+      client.send(JSON.stringify({
+        type: 'subscribe',
+        channel: 'metrics:app:*'
+      }));
+
+      return new Promise((resolve) => {
+        const receivedMessages = new Set<string>();
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'metrics') {
+            receivedMessages.add(message.data.type);
+            if (receivedMessages.size >= 2) {
+              expect(receivedMessages).toContain('metrics:system:cpu');
+              expect(receivedMessages).toContain('metrics:app:requests');
+              resolve(undefined);
+            }
+          }
+        });
+
+        // Publish to different patterns
+        metricsService.publish({
+          type: 'metrics:system:cpu',
+          value: 42,
+          timestamp: Date.now()
+        });
+
+        metricsService.publish({
+          type: 'metrics:app:requests',
+          value: 84,
+          timestamp: Date.now()
+        });
+      });
+    });
+  });
+
+  describe('Performance and Scaling', () => {
+    test('should handle high message throughput on mobile networks', async () => {
+      await simulateMobileNetwork();
+      const client = await createClient();
+      const messageCount = 1000;
+      const messages = Array(messageCount).fill(0).map((_, i) => ({
+        type: 'metrics:test',
+        value: i,
+        timestamp: Date.now()
+      }));
+
+      // Subscribe to test channel
+      client.send(JSON.stringify({
+        type: 'subscribe',
+        channel: 'metrics:test'
+      }));
+
+      return new Promise((resolve) => {
+        let receivedCount = 0;
+        const startTime = Date.now();
+
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'metrics') {
+            receivedCount++;
+            if (receivedCount >= messageCount) {
+              const duration = Date.now() - startTime;
+              const throughput = messageCount / (duration / 1000);
+              expect(throughput).toBeGreaterThan(50); // Adjusted for mobile networks
+              resolve(undefined);
+            }
+          }
+        });
+
+        // Publish messages rapidly
+        messages.forEach(msg => metricsService.publish(msg));
+      });
+    });
+
+    test('should maintain low latency under load', async () => {
+      const client = await createClient();
+      const latencies: number[] = [];
+
+      // Subscribe to test channel
+      client.send(JSON.stringify({
+        type: 'subscribe',
+        channel: 'metrics:latency'
+      }));
+
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'metrics') {
+            const latency = Date.now() - message.data.timestamp;
+            latencies.push(latency);
+
+            if (latencies.length >= 100) {
+              const avgLatency = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+              expect(avgLatency).toBeLessThan(50); // Less than 50ms average
+              resolve(undefined);
+            }
+          }
+        });
+
+        // Send 100 messages with timestamps
+        Array(100).fill(0).forEach(() => {
+          metricsService.publish({
+            type: 'metrics:latency',
+            value: Math.random(),
+            timestamp: Date.now()
+          });
+        });
+      });
+    });
+  });
+
+  describe('Error Recovery', () => {
+    test('should reconnect after connection loss', async () => {
+      const client = await createClient();
+
+      // Force connection drop
+      client.close();
+
+      // Attempt reconnection
+      const newClient = await createClient();
+      expect(newClient.readyState).toBe(WebSocket.OPEN);
+
+      return new Promise((resolve) => {
+        newClient.send(JSON.stringify({
+          type: 'subscribe',
+          channel: 'test-channel'
+        }));
+
+        newClient.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'subscribed') {
+            resolve(undefined);
+          }
+        });
+      });
+    });
+
+    test('should recover subscriptions after reconnect', async () => {
+      const client = await createClient();
+      
+      // Subscribe to channel
+      client.send(JSON.stringify({
+        type: 'subscribe',
+        channel: 'test-recovery'
+      }));
+
+      // Wait for subscription
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Force reconnection
+      client.close();
+      const newClient = await createClient();
+
+      return new Promise((resolve) => {
+        newClient.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'metrics') {
+            resolve(undefined);
+          }
+        });
+
+        // Publish message to check subscription recovery
+        metricsService.publish({
+          type: 'test-recovery',
+          value: 42,
+          timestamp: Date.now()
+        });
+      });
+    });
+  });
+
+  describe('Security', () => {
+    test('should reject unauthorized subscription attempts', async () => {
+      const client = await createClient();
+      
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'error' && message.data.message.includes('unauthorized')) {
+            resolve(undefined);
+          }
+        });
+
+        client.send(JSON.stringify({
+          type: 'subscribe',
+          channel: 'restricted-channel'
+        }));
+      });
+    });
+
+    test('should validate message formats', async () => {
+      const client = await createClient();
+      
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'error' && message.data.message.includes('format')) {
+            resolve(undefined);
+          }
+        });
+
+        client.send(JSON.stringify({
+          type: 'subscribe',
+          // Missing required channel field
+        }));
+      });
+    });
+  });
+});
+',
+          channel: 'test-channel'
+        }));
+      });
+    });
+
+    test('should handle unsubscribe messages', async () => {
+      const client = await createClient();
+      
+      // Subscribe first
+      client.send(JSON.stringify({
+        type: 'subscribe',
+        channel: 'test-channel'
+      }));
+
+      // Wait for subscription
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'unsubscribed') {
+            expect(message.channel).toBe('test-channel');
+            resolve(undefined);
+          }
+        });
+
+        client.send(JSON.stringify({
+          type: 'unsubscribe',
+          channel: 'test-channel'
+        }));
+      });
+    });
+
+    test('should handle invalid messages', async () => {
+      const client = await createClient();
+      
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'error') {
+            expect(message.data.message).toBe('Invalid message format');
+            resolve(undefined);
+          }
+        });
+
+        client.send('invalid json');
+      });
+    });
+  });
+
+  describe('Metrics Publishing', () => {
+    test('should publish metrics to subscribed clients', async () => {
+      const client = await createClient();
+      
+      // Subscribe to metrics channel
+      client.send(JSON.stringify({
+        type: 'subscribe',
+        channel: 'metrics:system'
+      }));
+
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'metrics') {
+            expect(message.data).toBeDefined();
+            resolve(undefined);
+          }
+        });
+
+        // Publish test metric
+        metricsService.publish({
+          type: 'system',
+          value: 42,
+          timestamp: Date.now()
+        });
+      });
+    });
+
+    test('should handle large metric batches', async () => {
+      const client = await createClient();
+      
+      // Subscribe to metrics channel
+      client.send(JSON.stringify({
+        type: 'subscribe',
+        channel: 'metrics:system'
+      }));
+
+      const metrics = Array(100).fill(0).map((_, i) => ({
+        type: 'system',
+        value: i,
+        timestamp: Date.now()
+      }));
+
+      let receivedCount = 0;
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'metrics') {
+            receivedCount += message.data.metrics.length;
+            if (receivedCount >= metrics.length) {
+              resolve(undefined);
+            }
+          }
+        });
+
+        // Publish metrics batch
+        metrics.forEach(metric => {
+          metricsService.publish(metric);
+        });
+      });
+    });
+  });
+
+  describe('Error Handling', () => {
+    test('should handle Redis connection failure', async () => {
+      // Force Redis disconnection
+      await redis.disconnect();
+      
+      const client = await createClient();
+      
+      return new Promise((resolve) => {
+        client.on('message', (data) => {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'error') {
+            expect(message.data.message).toContain('Redis');
+            resolve(undefined);
+          }
+        });
+
+        client.send(JSON.stringify({
+          type: 'subscribe',
+          channel: 'test-channel'
+        }));
+      });
+    });
+
+    test('should handle rate limiting', async () => {
+      const client = await createClient();
+      
+      // Send messages rapidly
+      const messages = Array(100).fill(0).map(() => JSON.stringify({
+        type: 'subscribe

@@ -1,0 +1,849 @@
+import { Redis } from 'ioredis';
+import { EventEmitter } from 'events';
+import { logger } from '@/utils/logger';
+
+interface Subscription {
+  clientId: string;
+  channel: string;
+  pattern?: string;
+  createdAt: number;
+  lastActive: number;
+  metadata?: Record<string, any>;
+}
+
+interface SubscriptionStats {
+  totalSubscriptions: number;
+  activeChannels: Set<string>;
+  clientCount: number;
+  patternSubscriptions: number;
+  channelSubscriptions: number;
+}
+
+export class WebSocketSubscriptionManager extends EventEmitter {
+  private redis: Redis;
+  private subscriptions: Map<string, Set<Subscription>>;
+  private patterns: Map<string, Set<Subscription>>;
+  private clientSubscriptions: Map<string, Set<string>>;
+  private cleanupInterval: NodeJS.Timeout | null;
+
+  constructor(redis: Redis) {
+    super();
+    this.redis = redis;
+    this.subscriptions = new Map();
+    this.patterns = new Map();
+    this.clientSubscriptions = new Map();
+    this.cleanupInterval = null;
+
+    this.startCleanupInterval();
+    logger.info('WebSocketSubscriptionManager initialized');
+  }
+
+  /**
+   * Subscribe client to channel
+   */
+  public async subscribe(
+    clientId: string,
+    channel: string,
+    metadata?: Record<string, any>
+  ): Promise<void> {
+    try {
+      // Check if channel is a pattern
+      const isPattern = this.isPatternChannel(channel);
+      const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+
+      // Create subscription
+      const subscription: Subscription = {
+        clientId,
+        channel,
+        pattern: isPattern ? channel : undefined,
+        createdAt: Date.now(),
+        lastActive: Date.now(),
+        metadata
+      };
+
+      // Add to channel subscriptions
+      if (!subscriptionMap.has(channel)) {
+        subscriptionMap.set(channel, new Set());
+      }
+      subscriptionMap.get(channel)?.add(subscription);
+
+      // Add to client subscriptions
+      if (!this.clientSubscriptions.has(clientId)) {
+        this.clientSubscriptions.set(clientId, new Set());
+      }
+      this.clientSubscriptions.get(clientId)?.add(channel);
+
+      // Subscribe to Redis channel if needed
+      if (isPattern) {
+        await this.redis.psubscribe(channel);
+      } else {
+        await this.redis.subscribe(channel);
+      }
+
+      this.emit('subscribed', {
+        clientId,
+        channel,
+        isPattern,
+        timestamp: Date.now()
+      });
+
+      logger.debug('Client subscribed to channel', {
+        clientId,
+        channel,
+        isPattern
+      });
+
+    } catch (error) {
+      logger.error('Subscription failed', { error, clientId, channel });
+      throw error;
+    }
+  }
+
+  /**
+   * Unsubscribe client from channel
+   */
+  public async unsubscribe(
+    clientId: string,
+    channel: string
+  ): Promise<void> {
+    try {
+      // Check if channel is a pattern
+      const isPattern = this.isPatternChannel(channel);
+      const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+
+      // Remove from channel subscriptions
+      const channelSubs = subscriptionMap.get(channel);
+      if (channelSubs) {
+        const subscription = Array.from(channelSubs)
+          .find(sub => sub.clientId === clientId);
+        
+        if (subscription) {
+          channelSubs.delete(subscription);
+
+          // Remove empty channel
+          if (channelSubs.size === 0) {
+            subscriptionMap.delete(channel);
+            
+            // Unsubscribe from Redis channel
+            if (isPattern) {
+              await this.redis.punsubscribe(channel);
+            } else {
+              await this.redis.unsubscribe(channel);
+            }
+          }
+        }
+      }
+
+      // Remove from client subscriptions
+      const clientSubs = this.clientSubscriptions.get(clientId);
+      if (clientSubs) {
+        clientSubs.delete(channel);
+        if (clientSubs.size === 0) {
+          this.clientSubscriptions.delete(clientId);
+        }
+      }
+
+      this.emit('unsubscribed', {
+        clientId,
+        channel,
+        isPattern,
+        timestamp: Date.now()
+      });
+
+      logger.debug('Client unsubscribed from channel', {
+        clientId,
+        channel,
+        isPattern
+      });
+
+    } catch (error) {
+      logger.error('Unsubscribe failed', { error, clientId, channel });
+      throw error;
+    }
+  }
+
+  /**
+   * Get all subscriptions for a client
+   */
+  public getClientSubscriptions(clientId: string): string[] {
+    return Array.from(this.clientSubscriptions.get(clientId) || []);
+  }
+
+  /**
+   * Get all subscribers for a channel
+   */
+  public getChannelSubscribers(channel: string): string[] {
+    const isPattern = this.isPatternChannel(channel);
+    const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+    const channelSubs = subscriptionMap.get(channel);
+
+    return channelSubs ? 
+      Array.from(channelSubs).map(sub => sub.clientId) :
+      [];
+  }
+
+  /**
+   * Update subscription activity
+   */
+  public updateActivity(clientId: string, channel: string): void {
+    const isPattern = this.isPatternChannel(channel);
+    const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+    const channelSubs = subscriptionMap.get(channel);
+
+    if (channelSubs) {
+      const subscription = Array.from(channelSubs)
+        .find(sub => sub.clientId === clientId);
+      
+      if (subscription) {
+        subscription.lastActive = Date.now();
+      }
+    }
+  }
+
+  /**
+   * Get matching pattern subscriptions for a channel
+   */
+  public getMatchingPatternSubscriptions(channel: string): Subscription[] {
+    const matches: Subscription[] = [];
+
+    for (const [pattern, subs] of this.patterns) {
+      if (this.matchesPattern(channel, pattern)) {
+        matches.push(...Array.from(subs));
+      }
+    }
+
+    return matches;
+  }
+
+  /**
+   * Get subscription statistics
+   */
+  public getStats(): SubscriptionStats {
+    return {
+      totalSubscriptions: Array.from(this.subscriptions.values())
+        .reduce((total, subs) => total + subs.size, 0) +
+        Array.from(this.patterns.values())
+        .reduce((total, subs) => total + subs.size, 0),
+      activeChannels: new Set([
+        ...this.subscriptions.keys(),
+        ...this.patterns.keys()
+      ]),
+      clientCount: this.clientSubscriptions.size,
+      patternSubscriptions: Array.from(this.patterns.values())
+        .reduce((total, subs) => total + subs.size, 0),
+      channelSubscriptions: Array.from(this.subscriptions.values())
+        .reduce((total, subs) => total + subs.size, 0)
+    };
+  }
+
+  /**
+   * Close subscription manager
+   */
+  public async close(): Promise<void> {
+    try {
+      // Stop cleanup interval
+      if (this.cleanupInterval) {
+        clearInterval(this.cleanupInterval);
+        this.cleanupInterval = null;
+      }
+
+      // Unsubscribe from all channels
+      const channels = Array.from(this.subscriptions.keys());
+      const patterns = Array.from(this.patterns.keys());
+
+      if (channels.length > 0) {
+        await this.redis.unsubscribe(...channels);
+      }
+      if (patterns.length > 0) {
+        await this.redis.punsubscribe(...patterns);
+      }
+
+      // Clear all subscriptions
+      this.subscriptions.clear();
+      this.patterns.clear();
+      this.clientSubscriptions.clear();
+
+      logger.info('SubscriptionManager closed');
+
+    } catch (error) {
+      logger.error('Error closing subscription manager', { error });
+      throw error;
+    }
+  }
+
+  private startCleanupInterval(): void {
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupStaleSubscriptions();
+    }, 300000); // Every 5 minutes
+  }
+
+  private async cleanupStaleSubscriptions(): Promise<void> {
+    const now = Date.now();
+    const staleThreshold = 3600000; // 1 hour
+    let cleanupCount = 0;
+
+    try {
+      // Check regular subscriptions
+      for (const [channel, subs] of this.subscriptions) {
+        const staleSubs = Array.from(subs)
+          .filter(sub => now - sub.lastActive > staleThreshold);
+        
+        for (const sub of staleSubs) {
+          await this.unsubscribe(sub.clientId, channel);
+          cleanupCount++;
+        }
+      }
+
+      // Check pattern subscriptions
+      for (const [pattern, subs] of this.patterns) {
+        const staleSubs = Array.from(subs)
+          .filter(sub => now - sub.lastActive > staleThreshold);
+        
+        for (const sub of staleSubs) {
+          await this.unsubscribe(sub.clientId, pattern);
+          cleanupCount++;
+        }
+      }
+
+      if (cleanupCount > 0) {
+        logger.info('Cleaned up stale subscriptions', { count: cleanupCount });
+      }
+
+    } catch (error) {
+      logger.error('Subscription cleanup failed', { error });
+    }
+  }
+
+  private isPatternChannel(channel: string): boolean {
+    return channel.includes('*') || channel.includes('?');
+  }
+
+  private matchesPattern(channel: string, pattern: string): boolean {
+    try {
+      // Convert Redis pattern to regex
+      const regexPattern = pattern
+        .replace(/[.+?^${}()|[\]\\]/g, '\\  private matchesPattern(channel: string, pattern: string): boolean {
+    ') // Escape regex special chars
+        .replace(/\*/g, '.*')                   // * becomes .*
+        .replace(/\?/g, '.');                   // ? becomes .
+      
+      const regex = new RegExp(`^${regexPattern}import { Redis } from 'ioredis';
+import { EventEmitter } from 'events';
+import { logger } from '@/utils/logger';
+
+interface Subscription {
+  clientId: string;
+  channel: string;
+  pattern?: string;
+  createdAt: number;
+  lastActive: number;
+  metadata?: Record<string, any>;
+}
+
+interface SubscriptionStats {
+  totalSubscriptions: number;
+  activeChannels: Set<string>;
+  clientCount: number;
+  patternSubscriptions: number;
+  channelSubscriptions: number;
+}
+
+export class WebSocketSubscriptionManager extends EventEmitter {
+  private redis: Redis;
+  private subscriptions: Map<string, Set<Subscription>>;
+  private patterns: Map<string, Set<Subscription>>;
+  private clientSubscriptions: Map<string, Set<string>>;
+  private cleanupInterval: NodeJS.Timeout | null;
+
+  constructor(redis: Redis) {
+    super();
+    this.redis = redis;
+    this.subscriptions = new Map();
+    this.patterns = new Map();
+    this.clientSubscriptions = new Map();
+    this.cleanupInterval = null;
+
+    this.startCleanupInterval();
+    logger.info('WebSocketSubscriptionManager initialized');
+  }
+
+  /**
+   * Subscribe client to channel
+   */
+  public async subscribe(
+    clientId: string,
+    channel: string,
+    metadata?: Record<string, any>
+  ): Promise<void> {
+    try {
+      // Check if channel is a pattern
+      const isPattern = this.isPatternChannel(channel);
+      const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+
+      // Create subscription
+      const subscription: Subscription = {
+        clientId,
+        channel,
+        pattern: isPattern ? channel : undefined,
+        createdAt: Date.now(),
+        lastActive: Date.now(),
+        metadata
+      };
+
+      // Add to channel subscriptions
+      if (!subscriptionMap.has(channel)) {
+        subscriptionMap.set(channel, new Set());
+      }
+      subscriptionMap.get(channel)?.add(subscription);
+
+      // Add to client subscriptions
+      if (!this.clientSubscriptions.has(clientId)) {
+        this.clientSubscriptions.set(clientId, new Set());
+      }
+      this.clientSubscriptions.get(clientId)?.add(channel);
+
+      // Subscribe to Redis channel if needed
+      if (isPattern) {
+        await this.redis.psubscribe(channel);
+      } else {
+        await this.redis.subscribe(channel);
+      }
+
+      this.emit('subscribed', {
+        clientId,
+        channel,
+        isPattern,
+        timestamp: Date.now()
+      });
+
+      logger.debug('Client subscribed to channel', {
+        clientId,
+        channel,
+        isPattern
+      });
+
+    } catch (error) {
+      logger.error('Subscription failed', { error, clientId, channel });
+      throw error;
+    }
+  }
+
+  /**
+   * Unsubscribe client from channel
+   */
+  public async unsubscribe(
+    clientId: string,
+    channel: string
+  ): Promise<void> {
+    try {
+      // Check if channel is a pattern
+      const isPattern = this.isPatternChannel(channel);
+      const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+
+      // Remove from channel subscriptions
+      const channelSubs = subscriptionMap.get(channel);
+      if (channelSubs) {
+        const subscription = Array.from(channelSubs)
+          .find(sub => sub.clientId === clientId);
+        
+        if (subscription) {
+          channelSubs.delete(subscription);
+
+          // Remove empty channel
+          if (channelSubs.size === 0) {
+            subscriptionMap.delete(channel);
+            
+            // Unsubscribe from Redis channel
+            if (isPattern) {
+              await this.redis.punsubscribe(channel);
+            } else {
+              await this.redis.unsubscribe(channel);
+            }
+          }
+        }
+      }
+
+      // Remove from client subscriptions
+      const clientSubs = this.clientSubscriptions.get(clientId);
+      if (clientSubs) {
+        clientSubs.delete(channel);
+        if (clientSubs.size === 0) {
+          this.clientSubscriptions.delete(clientId);
+        }
+      }
+
+      this.emit('unsubscribed', {
+        clientId,
+        channel,
+        isPattern,
+        timestamp: Date.now()
+      });
+
+      logger.debug('Client unsubscribed from channel', {
+        clientId,
+        channel,
+        isPattern
+      });
+
+    } catch (error) {
+      logger.error('Unsubscribe failed', { error, clientId, channel });
+      throw error;
+    }
+  }
+
+  /**
+   * Get all subscriptions for a client
+   */
+  public getClientSubscriptions(clientId: string): string[] {
+    return Array.from(this.clientSubscriptions.get(clientId) || []);
+  }
+
+  /**
+   * Get all subscribers for a channel
+   */
+  public getChannelSubscribers(channel: string): string[] {
+    const isPattern = this.isPatternChannel(channel);
+    const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+    const channelSubs = subscriptionMap.get(channel);
+
+    return channelSubs ? 
+      Array.from(channelSubs).map(sub => sub.clientId) :
+      [];
+  }
+
+  /**
+   * Update subscription activity
+   */
+  public updateActivity(clientId: string, channel: string): void {
+    const isPattern = this.isPatternChannel(channel);
+    const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+    const channelSubs = subscriptionMap.get(channel);
+
+    if (channelSubs) {
+      const subscription = Array.from(channelSubs)
+        .find(sub => sub.clientId === clientId);
+      
+      if (subscription) {
+        subscription.lastActive = Date.now();
+      }
+    }
+  }
+
+  /**
+   * Get matching pattern subscriptions for a channel
+   */
+  public getMatchingPatternSubscriptions(channel: string): Subscription[] {
+    const matches: Subscription[] = [];
+
+    for (const [pattern, subs] of this.patterns) {
+      if (this.matchesPattern(channel, pattern)) {
+        matches.push(...Array.from(subs));
+      }
+    }
+
+    return matches;
+  }
+
+  /**
+   * Get subscription statistics
+   */
+  public getStats(): SubscriptionStats {
+    return {
+      totalSubscriptions: Array.from(this.subscriptions.values())
+        .reduce((total, subs) => total + subs.size, 0) +
+        Array.from(this.patterns.values())
+        .reduce((total, subs) => total + subs.size, 0),
+      activeChannels: new Set([
+        ...this.subscriptions.keys(),
+        ...this.patterns.keys()
+      ]),
+      clientCount: this.clientSubscriptions.size,
+      patternSubscriptions: Array.from(this.patterns.values())
+        .reduce((total, subs) => total + subs.size, 0),
+      channelSubscriptions: Array.from(this.subscriptions.values())
+        .reduce((total, subs) => total + subs.size, 0)
+    };
+  }
+
+  /**
+   * Close subscription manager
+   */
+  public async close(): Promise<void> {
+    try {
+      // Stop cleanup interval
+      if (this.cleanupInterval) {
+        clearInterval(this.cleanupInterval);
+        this.cleanupInterval = null;
+      }
+
+      // Unsubscribe from all channels
+      const channels = Array.from(this.subscriptions.keys());
+      const patterns = Array.from(this.patterns.keys());
+
+      if (channels.length > 0) {
+        await this.redis.unsubscribe(...channels);
+      }
+      if (patterns.length > 0) {
+        await this.redis.punsubscribe(...patterns);
+      }
+
+      // Clear all subscriptions
+      this.subscriptions.clear();
+      this.patterns.clear();
+      this.clientSubscriptions.clear();
+
+      logger.info('SubscriptionManager closed');
+
+    } catch (error) {
+      logger.error('Error closing subscription manager', { error });
+      throw error;
+    }
+  }
+
+  private startCleanupInterval(): void {
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupStaleSubscriptions();
+    }, 300000); // Every 5 minutes
+  }
+
+  private async cleanupStaleSubscriptions(): Promise<void> {
+    const now = Date.now();
+    const staleThreshold = 3600000; // 1 hour
+    let cleanupCount = 0;
+
+    try {
+      // Check regular subscriptions
+      for (const [channel, subs] of this.subscriptions) {
+        const staleSubs = Array.from(subs)
+          .filter(sub => now - sub.lastActive > staleThreshold);
+        
+        for (const sub of staleSubs) {
+          await this.unsubscribe(sub.clientId, channel);
+          cleanupCount++;
+        }
+      }
+
+      // Check pattern subscriptions
+      for (const [pattern, subs] of this.patterns) {
+        const staleSubs = Array.from(subs)
+          .filter(sub => now - sub.lastActive > staleThreshold);
+        
+        for (const sub of staleSubs) {
+          await this.unsubscribe(sub.clientId, pattern);
+          cleanupCount++;
+        }
+      }
+
+      if (cleanupCount > 0) {
+        logger.info('Cleaned up stale subscriptions', { count: cleanupCount });
+      }
+
+    } catch (error) {
+      logger.error('Subscription cleanup failed', { error });
+    }
+  }
+
+  private isPatternChannel(channel: string): boolean {
+    return channel.includes('*') || channel.includes('?');
+  }
+
+);
+      return regex.test(channel);
+
+    } catch (error) {
+      logger.error('Pattern matching failed', {
+        error,
+        channel,
+        pattern
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Remove all subscriptions for a client
+   */
+  public async removeClient(clientId: string): Promise<void> {
+    try {
+      const subscriptions = this.getClientSubscriptions(clientId);
+      
+      for (const channel of subscriptions) {
+        await this.unsubscribe(clientId, channel);
+      }
+
+      logger.info('Removed all client subscriptions', {
+        clientId,
+        subscriptionCount: subscriptions.length
+      });
+
+    } catch (error) {
+      logger.error('Failed to remove client subscriptions', {
+        error,
+        clientId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Check if a client is subscribed to a channel
+   */
+  public isSubscribed(clientId: string, channel: string): boolean {
+    return this.clientSubscriptions.get(clientId)?.has(channel) || false;
+  }
+
+  /**
+   * Get subscription metadata
+   */
+  public getSubscriptionMetadata(
+    clientId: string,
+    channel: string
+  ): Record<string, any> | undefined {
+    const isPattern = this.isPatternChannel(channel);
+    const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+    const channelSubs = subscriptionMap.get(channel);
+
+    if (channelSubs) {
+      const subscription = Array.from(channelSubs)
+        .find(sub => sub.clientId === clientId);
+      
+      return subscription?.metadata;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Update subscription metadata
+   */
+  public updateSubscriptionMetadata(
+    clientId: string,
+    channel: string,
+    metadata: Record<string, any>
+  ): void {
+    const isPattern = this.isPatternChannel(channel);
+    const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+    const channelSubs = subscriptionMap.get(channel);
+
+    if (channelSubs) {
+      const subscription = Array.from(channelSubs)
+        .find(sub => sub.clientId === clientId);
+      
+      if (subscription) {
+        subscription.metadata = {
+          ...subscription.metadata,
+          ...metadata
+        };
+      }
+    }
+  }
+
+  /**
+   * Get active channels matching a pattern
+   */
+  public getMatchingChannels(pattern: string): string[] {
+    const matches: string[] = [];
+
+    for (const channel of this.subscriptions.keys()) {
+      if (this.matchesPattern(channel, pattern)) {
+        matches.push(channel);
+      }
+    }
+
+    return matches;
+  }
+
+  /**
+   * Check subscription health
+   */
+  public checkHealth(): {
+    status: 'healthy' | 'warning' | 'error';
+    issues: string[];
+  } {
+    const issues: string[] = [];
+    let status: 'healthy' | 'warning' | 'error' = 'healthy';
+
+    // Check for orphaned subscriptions
+    for (const [clientId, channels] of this.clientSubscriptions) {
+      for (const channel of channels) {
+        const isPattern = this.isPatternChannel(channel);
+        const subscriptionMap = isPattern ? this.patterns : this.subscriptions;
+        const channelSubs = subscriptionMap.get(channel);
+
+        if (!channelSubs?.size) {
+          issues.push(`Orphaned subscription found: ${clientId} -> ${channel}`);
+          status = 'warning';
+        }
+      }
+    }
+
+    // Check for stale subscriptions
+    const now = Date.now();
+    const staleThreshold = 3600000; // 1 hour
+
+    for (const subs of this.subscriptions.values()) {
+      for (const sub of subs) {
+        if (now - sub.lastActive > staleThreshold) {
+          issues.push(`Stale subscription found: ${sub.clientId} -> ${sub.channel}`);
+          status = 'warning';
+        }
+      }
+    }
+
+    // Check Redis connection
+    if (!this.redis.status || this.redis.status !== 'ready') {
+      issues.push('Redis connection is not ready');
+      status = 'error';
+    }
+
+    return { status, issues };
+  }
+
+  /**
+   * Get detailed subscription analytics
+   */
+  public getAnalytics(): {
+    subscriptionsByChannel: Record<string, number>;
+    subscriptionsByClient: Record<string, number>;
+    patternStats: Record<string, number>;
+    activeSubscriptions: number;
+    totalSubscriptions: number;
+    avgSubscriptionsPerClient: number;
+    avgClientsPerChannel: number;
+  } {
+    const subscriptionsByChannel: Record<string, number> = {};
+    const subscriptionsByClient: Record<string, number> = {};
+    const patternStats: Record<string, number> = {};
+
+    // Calculate channel stats
+    for (const [channel, subs] of this.subscriptions) {
+      subscriptionsByChannel[channel] = subs.size;
+    }
+
+    // Calculate pattern stats
+    for (const [pattern, subs] of this.patterns) {
+      patternStats[pattern] = subs.size;
+    }
+
+    // Calculate client stats
+    for (const [clientId, channels] of this.clientSubscriptions) {
+      subscriptionsByClient[clientId] = channels.size;
+    }
+
+    const totalClients = this.clientSubscriptions.size;
+    const totalChannels = this.subscriptions.size + this.patterns.size;
+    const totalSubscriptions = Object.values(subscriptionsByChannel)
+      .concat(Object.values(patternStats))
+      .reduce((sum, count) => sum + count, 0);
+
+    return {
+      subscriptionsByChannel,
+      subscriptionsByClient,
+      patternStats,
+      activeSubscriptions: totalSubscriptions,
+      totalSubscriptions: totalSubscriptions,
+      avgSubscriptionsPerClient: totalClients ? totalSubscriptions / totalClients : 0,
+      avgClientsPerChannel: totalChannels ? totalSubscriptions / totalChannels : 0
+    };
+  }
+}

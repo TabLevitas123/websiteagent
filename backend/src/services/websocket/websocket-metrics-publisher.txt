@@ -1,0 +1,321 @@
+import { EventEmitter } from 'events';
+import { Redis } from 'ioredis';
+import { logger } from '@/utils/logger';
+import { MetricsService } from '@/services/metrics';
+import { WebSocketEventHandler } from './WebSocketEventHandler';
+
+interface MetricMessage {
+  type: string;
+  timestamp: number;
+  data: any;
+}
+
+interface PublisherStats {
+  messagesPublished: number;
+  lastPublishTime: number;
+  activeChannels: Set<string>;
+  errorCount: number;
+  avgPublishLatency: number;
+}
+
+export class WebSocketMetricsPublisher extends EventEmitter {
+  private eventHandler: WebSocketEventHandler;
+  private metricsService: MetricsService;
+  private redis: Redis;
+  private stats: PublisherStats;
+  private publishLatencies: number[] = [];
+  private readonly maxLatencySamples = 100;
+  private batchQueue: Map<string, any[]> = new Map();
+  private batchTimeout: NodeJS.Timeout | null = null;
+  private readonly maxBatchSize = 100;
+  private readonly batchInterval = 1000; // 1 second
+
+  constructor(
+    eventHandler: WebSocketEventHandler,
+    metricsService: MetricsService,
+    redis: Redis
+  ) {
+    super();
+    this.eventHandler = eventHandler;
+    this.metricsService = metricsService;
+    this.redis = redis;
+    
+    this.stats = {
+      messagesPublished: 0,
+      lastPublishTime: 0,
+      activeChannels: new Set(),
+      errorCount: 0,
+      avgPublishLatency: 0
+    };
+
+    this.setupMetricsSubscriptions();
+    this.startPerformanceMonitoring();
+
+    logger.info('WebSocketMetricsPublisher initialized');
+  }
+
+  private setupMetricsSubscriptions(): void {
+    // Subscribe to Redis channels for different metric types
+    const metricChannels = [
+      'metrics:system',
+      'metrics:application',
+      'metrics:business',
+      'metrics:custom'
+    ];
+
+    metricChannels.forEach(channel => {
+      this.redis.subscribe(channel, (err) => {
+        if (err) {
+          logger.error('Redis subscription failed', { error: err, channel });
+          return;
+        }
+        this.stats.activeChannels.add(channel);
+        logger.info('Subscribed to metrics channel', { channel });
+      });
+    });
+
+    // Handle incoming Redis messages
+    this.redis.on('message', (channel: string, message: string) => {
+      try {
+        const metricData = JSON.parse(message);
+        this.handleMetricUpdate(channel, metricData);
+      } catch (error) {
+        logger.error('Failed to process Redis message', { error, channel });
+        this.stats.errorCount++;
+      }
+    });
+
+    // Handle Redis connection errors
+    this.redis.on('error', (error) => {
+      logger.error('Redis connection error', { error });
+      this.stats.errorCount++;
+      this.emit('error', error);
+    });
+  }
+
+  private async handleMetricUpdate(channel: string, data: any): Promise<void> {
+    try {
+      // Add to batch queue
+      if (!this.batchQueue.has(channel)) {
+        this.batchQueue.set(channel, []);
+      }
+      this.batchQueue.get(channel)?.push(data);
+
+      // Schedule or process batch
+      if (this.shouldProcessBatch(channel)) {
+        await this.processBatch(channel);
+      } else if (!this.batchTimeout) {
+        this.scheduleBatchProcessing();
+      }
+
+    } catch (error) {
+      logger.error('Failed to handle metric update', { error, channel });
+      this.stats.errorCount++;
+    }
+  }
+
+  private shouldProcessBatch(channel: string): boolean {
+    return (this.batchQueue.get(channel)?.length || 0) >= this.maxBatchSize;
+  }
+
+  private scheduleBatchProcessing(): void {
+    if (this.batchTimeout) return;
+
+    this.batchTimeout = setTimeout(() => {
+      this.processAllBatches();
+      this.batchTimeout = null;
+    }, this.batchInterval);
+  }
+
+  private async processBatch(channel: string): Promise<void> {
+    const batch = this.batchQueue.get(channel) || [];
+    if (batch.length === 0) return;
+
+    const startTime = Date.now();
+
+    try {
+      // Process batch
+      const message: MetricMessage = {
+        type: 'metrics_batch',
+        timestamp: Date.now(),
+        data: {
+          channel,
+          metrics: batch,
+          batchSize: batch.length
+        }
+      };
+
+      // Publish to WebSocket clients
+      await this.publish(message);
+
+      // Clear processed batch
+      this.batchQueue.set(channel, []);
+
+      // Update stats
+      const latency = Date.now() - startTime;
+      this.updatePublishLatency(latency);
+      this.stats.messagesPublished += batch.length;
+      this.stats.lastPublishTime = Date.now();
+
+    } catch (error) {
+      logger.error('Failed to process batch', { error, channel, batchSize: batch.length });
+      this.stats.errorCount++;
+    }
+  }
+
+  private async processAllBatches(): Promise<void> {
+    const channels = Array.from(this.batchQueue.keys());
+    
+    for (const channel of channels) {
+      await this.processBatch(channel);
+    }
+  }
+
+  private updatePublishLatency(latency: number): void {
+    this.publishLatencies.push(latency);
+    
+    // Keep only last N samples
+    if (this.publishLatencies.length > this.maxLatencySamples) {
+      this.publishLatencies.shift();
+    }
+
+    // Update average
+    this.stats.avgPublishLatency = this.publishLatencies.reduce((a, b) => a + b, 0) / 
+      this.publishLatencies.length;
+  }
+
+  public async publish(message: MetricMessage): Promise<void> {
+    const startTime = Date.now();
+
+    try {
+      // Compress data if needed
+      const compressedData = await this.compressIfNeeded(message);
+
+      // Broadcast to all relevant subscribers
+      await this.eventHandler.broadcast({
+        type: 'metrics',
+        data: compressedData
+      });
+
+      const latency = Date.now() - startTime;
+      this.updatePublishLatency(latency);
+
+      // Emit metrics
+      this.emit('published', {
+        messageType: message.type,
+        timestamp: Date.now(),
+        latency
+      });
+
+    } catch (error) {
+      logger.error('Failed to publish message', { error });
+      this.stats.errorCount++;
+      throw error;
+    }
+  }
+
+  private async compressIfNeeded(data: any): Promise<any> {
+    const jsonStr = JSON.stringify(data);
+    if (jsonStr.length < 1024) {  // Don't compress small messages
+      return data;
+    }
+
+    try {
+      const { deflate } = await import('zlib');
+      const { promisify } = await import('util');
+      const deflateAsync = promisify(deflate);
+
+      const compressed = await deflateAsync(jsonStr);
+      return {
+        compressed: true,
+        data: compressed.toString('base64')
+      };
+
+    } catch (error) {
+      logger.warn('Compression failed, sending uncompressed', { error });
+      return data;
+    }
+  }
+
+  private startPerformanceMonitoring(): void {
+    setInterval(() => {
+      const stats = this.getStats();
+      
+      // Log performance metrics
+      logger.info('Metrics publisher performance', {
+        ...stats,
+        timestamp: Date.now()
+      });
+
+      // Check for performance issues
+      this.checkPerformanceThresholds(stats);
+
+    }, 60000); // Every minute
+  }
+
+  private checkPerformanceThresholds(stats: PublisherStats): void {
+    // Check latency threshold
+    if (stats.avgPublishLatency > 100) { // 100ms threshold
+      logger.warn('High publish latency detected', {
+        avgLatency: stats.avgPublishLatency,
+        timestamp: Date.now()
+      });
+    }
+
+    // Check error rate
+    const errorRate = stats.errorCount / stats.messagesPublished;
+    if (errorRate > 0.01) { // 1% threshold
+      logger.warn('High error rate detected', {
+        errorRate,
+        errorCount: stats.errorCount,
+        messagesPublished: stats.messagesPublished
+      });
+    }
+
+    // Check queue sizes
+    for (const [channel, queue] of this.batchQueue) {
+      if (queue.length > this.maxBatchSize * 2) {
+        logger.warn('Large queue size detected', {
+          channel,
+          queueSize: queue.length,
+          maxBatchSize: this.maxBatchSize
+        });
+      }
+    }
+  }
+
+  public getStats(): PublisherStats {
+    return {
+      ...this.stats,
+      batchQueueSizes: Object.fromEntries(
+        Array.from(this.batchQueue.entries())
+          .map(([channel, queue]) => [channel, queue.length])
+      )
+    };
+  }
+
+  public async close(): Promise<void> {
+    try {
+      // Clear batch timeout
+      if (this.batchTimeout) {
+        clearTimeout(this.batchTimeout);
+        this.batchTimeout = null;
+      }
+
+      // Process remaining batches
+      await this.processAllBatches();
+
+      // Unsubscribe from Redis channels
+      const channels = Array.from(this.stats.activeChannels);
+      if (channels.length > 0) {
+        await this.redis.unsubscribe(...channels);
+      }
+
+      logger.info('WebSocketMetricsPublisher closed');
+
+    } catch (error) {
+      logger.error('Error closing metrics publisher', { error });
+      throw error;
+    }
+  }
+}

@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+/**
+ * @title ITokenFactory
+ * @dev Interface for the AI Agent Token Factory
+ */
+interface ITokenFactory {
+    /**
+     * @dev Creates a new AI Agent token
+     * @param name Token name
+     * @param symbol Token symbol
+     * @param initialSupply Initial token supply
+     * @return address The address of the newly created token
+     */
+    function createToken(
+        string memory name,
+        string memory symbol,
+        uint256 initialSupply
+    ) external payable returns (address);
+
+    /**
+     * @dev Retrieves tokens owned by an address
+     * @param owner Address to query
+     * @return uint256[] Array of token IDs owned by the address
+     */
+    function getTokensByOwner(address owner)
+        external
+        view
+        returns (uint256[] memory);
+}
