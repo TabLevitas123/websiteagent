@@ -1,0 +1,250 @@
+.agent-functions {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 2rem;
+  backdrop-filter: blur(10px);
+  max-width: 1000px;
+  margin: 2rem auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.functions-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.functions-header h3 {
+  margin: 0;
+  color: #64ffda;
+}
+
+.functions-content {
+  display: grid;
+  grid-template-columns: 250px 1fr;
+  gap: 2rem;
+}
+
+.function-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.function-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-align: left;
+}
+
+.function-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.function-item.active {
+  background: #64ffda;
+  color: #1a237e;
+}
+
+.function-name {
+  font-weight: 500;
+}
+
+.function-version {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.function-details {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1.5rem;
+}
+
+.function-info {
+  margin-bottom: 2rem;
+}
+
+.function-info h4 {
+  margin: 0 0 0.5rem;
+  color: #64ffda;
+}
+
+.description {
+  color: rgba(255, 255, 255, 0.9);
+  margin: 0 0 1rem;
+  line-height: 1.4;
+}
+
+.metadata {
+  display: flex;
+  gap: 1rem;
+}
+
+.category, .version {
+  padding: 0.25rem 0.75rem;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.function-form {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1.5rem;
+}
+
+.function-form h4 {
+  margin: 0 0 1rem;
+  color: white;
+}
+
+.input-group {
+  margin-bottom: 1rem;
+}
+
+.input-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.9rem;
+}
+
+.input-group input,
+.input-group select {
+  width: 100%;
+  padding: 0.75rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: white;
+}
+
+.input-group input:focus,
+.input-group select:focus {
+  outline: none;
+  border-color: #64ffda;
+}
+
+.execute-button {
+  width: 100%;
+  padding: 0.75rem;
+  background: #64ffda;
+  border: none;
+  border-radius: 4px;
+  color: #1a237e;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.execute-button:hover:not(:disabled) {
+  background: #00bfa5;
+}
+
+.execute-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.execution-history {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.execution-item {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.execution-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.status {
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.status.success {
+  background: rgba(0, 230, 118, 0.1);
+  color: #00e676;
+}
+
+.status.error {
+  background: rgba(255, 23, 68, 0.1);
+  color: #ff1744;
+}
+
+.execution-details {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.execution-inputs,
+.execution-outputs {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  padding: 1rem;
+}
+
+.execution-inputs h5,
+.execution-outputs h5 {
+  margin: 0 0 0.5rem;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.9rem;
+}
+
+.execution-inputs pre,
+.execution-outputs pre {
+  margin: 0;
+  color: white;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.no-data {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.5);
+  padding: 2rem;
+}
+
+.loading-spinner {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.error-message {
+  background: rgba(255, 23, 68, 0.1);
+  color: #ff1744;
+  padding: 1rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  text-align: center;
+}

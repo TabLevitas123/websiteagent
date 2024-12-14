@@ -1,0 +1,258 @@
+.agent-marketplace {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 2rem;
+  backdrop-filter: blur(10px);
+  max-width: 1200px;
+  margin: 2rem auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.marketplace-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.marketplace-header h2 {
+  margin: 0;
+  color: #64ffda;
+}
+
+.marketplace-filters {
+  margin-bottom: 2rem;
+}
+
+.search-bar {
+  margin-bottom: 1rem;
+}
+
+.search-bar input {
+  width: 100%;
+  padding: 0.75rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: white;
+}
+
+.filter-controls {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.price-filters {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.price-filters input {
+  width: 120px;
+  padding: 0.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: white;
+}
+
+.filter-controls select {
+  padding: 0.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: white;
+}
+
+.sort-controls {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.sort-button {
+  padding: 0.5rem 1rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.sort-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.sort-button.active {
+  background: #64ffda;
+  color: #1a237e;
+  border-color: #64ffda;
+}
+
+.listings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+
+.listing-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: transform 0.3s ease;
+}
+
+.listing-card:hover {
+  transform: translateY(-4px);
+}
+
+.listing-image {
+  position: relative;
+  aspect-ratio: 1;
+  overflow: hidden;
+}
+
+.listing-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.status-badge {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.status-badge.verified {
+  background: #00e676;
+  color: #1a237e;
+}
+
+.status-badge.unverified {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+.listing-details {
+  padding: 1.5rem;
+}
+
+.listing-details h3 {
+  margin: 0 0 0.5rem;
+  color: white;
+}
+
+.listing-details .symbol {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+}
+
+.listing-details .description {
+  color: rgba(255, 255, 255, 0.9);
+  margin: 0 0 1rem;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.listing-stats {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.listing-stats .interactions {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.listing-stats .price {
+  color: #64ffda;
+  font-weight: 500;
+}
+
+.purchase-button {
+  width: 100%;
+  padding: 0.75rem;
+  background: #64ffda;
+  border: none;
+  border-radius: 4px;
+  color: #1a237e;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.purchase-button:hover:not(:disabled) {
+  background: #00bfa5;
+}
+
+.purchase-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+.pagination button {
+  padding: 0.5rem 1rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.pagination button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.pagination button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pagination span {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.no-results {
+  text-align: center;
+  padding: 3rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.loading-spinner {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 300px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.error-message {
+  background: rgba(255, 23, 68, 0.1);
+  color: #ff1744;
+  padding: 1rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  text-align: center;
+}

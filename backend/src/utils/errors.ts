@@ -1,48 +1,63 @@
 import { ValidationError } from '../types';
 
-export class ApiError extends Error {
-  statusCode: number;
-  errors?: ValidationError[];
-
-  constructor(message: string, statusCode: number = 500, errors?: ValidationError[]) {
+export class AppError extends Error {
+  constructor(
+    public statusCode: number,
+    message: string,
+    public isOperational = true,
+    public details?: any
+  ) {
     super(message);
-    this.name = 'ApiError';
-    this.statusCode = statusCode;
-    this.errors = errors;
+    Object.setPrototypeOf(this, AppError.prototype);
+    Error.captureStackTrace(this, this.constructor);
   }
 }
 
-export class AuthenticationError extends ApiError {
-  constructor(message: string = 'Authentication failed', errors?: ValidationError[]) {
-    super(message, 401, errors);
-    this.name = 'AuthenticationError';
+export class ValidationError extends AppError {
+  constructor(message: string, details?: any) {
+    super(400, message, true, details);
+    Object.setPrototypeOf(this, ValidationError.prototype);
   }
 }
 
-export class AuthorizationError extends ApiError {
-  constructor(message: string = 'Insufficient permissions', errors?: ValidationError[]) {
-    super(message, 403, errors);
-    this.name = 'AuthorizationError';
+export class AuthenticationError extends AppError {
+  constructor(message: string = 'Authentication failed') {
+    super(401, message, true);
+    Object.setPrototypeOf(this, AuthenticationError.prototype);
   }
 }
 
-export class ValidationFailedError extends ApiError {
-  constructor(message: string = 'Validation failed', errors?: ValidationError[]) {
-    super(message, 400, errors);
-    this.name = 'ValidationFailedError';
+export class AuthorizationError extends AppError {
+  constructor(message: string = 'Insufficient permissions') {
+    super(403, message, true);
+    Object.setPrototypeOf(this, AuthorizationError.prototype);
   }
 }
 
-export class NotFoundError extends ApiError {
-  constructor(message: string = 'Resource not found', errors?: ValidationError[]) {
-    super(message, 404, errors);
-    this.name = 'NotFoundError';
+export class NotFoundError extends AppError {
+  constructor(resource: string) {
+    super(404, `${resource} not found`, true);
+    Object.setPrototypeOf(this, NotFoundError.prototype);
   }
 }
 
-export class RateLimitExceededError extends ApiError {
-  constructor(message: string = 'Rate limit exceeded', errors?: ValidationError[]) {
-    super(message, 429, errors);
-    this.name = 'RateLimitExceededError';
+export class ConflictError extends AppError {
+  constructor(message: string) {
+    super(409, message, true);
+    Object.setPrototypeOf(this, ConflictError.prototype);
+  }
+}
+
+export class RateLimitError extends AppError {
+  constructor(message: string = 'Rate limit exceeded') {
+    super(429, message, true);
+    Object.setPrototypeOf(this, RateLimitError.prototype);
+  }
+}
+
+export class ServerError extends AppError {
+  constructor(message: string = 'Internal server error') {
+    super(500, message, false);
+    Object.setPrototypeOf(this, ServerError.prototype);
   }
 }

@@ -1,0 +1,144 @@
+.agent-dashboard {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 2rem;
+  backdrop-filter: blur(10px);
+  margin-top: 2rem;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.close-button {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 2rem;
+  cursor: pointer;
+  padding: 0.5rem;
+  line-height: 1;
+}
+
+.close-button:hover {
+  color: #64ffda;
+}
+
+.agents-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+}
+
+.agent-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1.5rem;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.agent-card:hover {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: #64ffda;
+}
+
+.agent-card.selected {
+  border-color: #64ffda;
+  background: rgba(100, 255, 218, 0.1);
+}
+
+.agent-info h3 {
+  margin: 0 0 1rem;
+  color: #64ffda;
+}
+
+.agent-address {
+  font-family: monospace;
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0.5rem 0;
+}
+
+.creation-date {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.9rem;
+  margin: 0.5rem 0;
+}
+
+.agent-actions {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.action-button {
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+  font-size: 0.9rem;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.3s ease;
+}
+
+.action-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.action-button.view {
+  background: rgba(100, 255, 218, 0.2);
+}
+
+.action-button.view:hover {
+  background: rgba(100, 255, 218, 0.3);
+}
+
+.action-button.explorer {
+  background: rgba(20, 241, 149, 0.2);
+}
+
+.action-button.explorer:hover {
+  background: rgba(20, 241, 149, 0.3);
+}
+
+.no-agents {
+  text-align: center;
+  padding: 3rem 0;
+}
+
+.create-button {
+  background: #64ffda;
+  color: #1a237e;
+  border: none;
+  padding: 1rem 2rem;
+  border-radius: 8px;
+  font-weight: bold;
+  cursor: pointer;
+  margin-top: 1rem;
+  transition: all 0.3s ease;
+}
+
+.create-button:hover {
+  background: #00bfa5;
+  transform: translateY(-2px);
+}
+
+.loading-spinner {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+  color: rgba(255, 255, 255, 0.7);
+}

@@ -1,0 +1,104 @@
+.transaction-status {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 2rem;
+  margin-top: 2rem;
+}
+
+.transaction-status h3 {
+  margin: 0 0 2rem;
+  color: #64ffda;
+  text-align: center;
+}
+
+.status-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.status-step {
+  display: flex;
+  gap: 1.5rem;
+  position: relative;
+}
+
+.status-step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 20px;
+  top: 40px;
+  bottom: -30px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.step-number {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.status-step.completed .step-number {
+  background: #64ffda;
+  color: #1a237e;
+}
+
+.status-step.current .step-number {
+  background: #14f195;
+  color: #1a237e;
+  animation: pulse 2s infinite;
+}
+
+.step-content {
+  flex-grow: 1;
+}
+
+.step-content h4 {
+  margin: 0 0 0.5rem;
+  color: white;
+}
+
+.step-description {
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.loading-spinner {
+  color: #64ffda;
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.success {
+  color: #00e676;
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.error {
+  color: #ff1744;
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(20, 241, 149, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(20, 241, 149, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(20, 241, 149, 0);
+  }
+}

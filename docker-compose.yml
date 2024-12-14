@@ -15,6 +15,10 @@ services:
     environment:
       - MONGODB_URI=mongodb://mongo:27017/ai-agent-tokens
       - JWT_SECRET=your_jwt_secret
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
 
   mongo:
     image: mongo
@@ -23,5 +27,19 @@ services:
     volumes:
       - mongo-data:/data/db
 
+  redis:
+    image: redis:alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
 volumes:
   mongo-data:
+  redis-data:

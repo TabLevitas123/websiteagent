@@ -1,0 +1,134 @@
+.agent-analytics {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 2rem;
+  backdrop-filter: blur(10px);
+  max-width: 800px;
+  margin: 2rem auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.analytics-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.analytics-header h3 {
+  margin: 0;
+  color: #64ffda;
+}
+
+.analytics-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.analytics-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.summary-card {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.summary-card h4 {
+  margin: 0 0 1rem;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.9rem;
+}
+
+.summary-card .stat {
+  margin: 0;
+  color: #64ffda;
+  font-size: 1.5rem;
+  font-weight: 500;
+}
+
+.chart-controls {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+
+.period-selector {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 20px;
+  padding: 0.25rem;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.period-selector button {
+  background: none;
+  border: none;
+  color: white;
+  padding: 0.5rem 1rem;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.period-selector button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.period-selector button.active {
+  background: #64ffda;
+  color: #1a237e;
+}
+
+.analytics-chart {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1.5rem;
+}
+
+.loading-spinner {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.error-message {
+  color: #ff1744;
+  text-align: center;
+  padding: 2rem;
+}
+
+/* Recharts customization */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: rgba(255, 255, 255, 0.1);
+}
+
+.recharts-tooltip-wrapper {
+  outline: none;
+}
+
+.recharts-default-tooltip {
+  background-color: rgba(0, 0, 0, 0.8) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 4px;
+}
+
+.recharts-tooltip-label {
+  color: white !important;
+}
+
+.recharts-tooltip-item {
+  color: #64ffda !important;
+}
+
+.recharts-legend-item-text {
+  color: white !important;
+}

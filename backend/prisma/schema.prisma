@@ -1,0 +1,111 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model AgentMetadata {
+  id              Int               @id @default(autoincrement())
+  agentAddress    String           @unique
+  name            String
+  symbol          String
+  description     String?
+  imageUrl        String?
+  externalUrl     String?
+  attributes      Json?
+  paymentTx       String           @unique
+  creator         String
+  createdAt       DateTime         @default(now())
+  verificationStatus VerificationStatus @default(UNVERIFIED)
+  verifiedAt      DateTime?
+  verifiedBy      String?
+  transferHistory TransferHistory[]
+  metadataHistory MetadataHistory[]
+  analytics       AgentAnalytics?
+  verificationHistory VerificationHistory[]
+
+  @@index([creator])
+  @@index([paymentTx])
+  @@index([verificationStatus])
+}
+
+model TransferHistory {
+  id              Int           @id @default(autoincrement())
+  agentAddress    String
+  fromAddress     String
+  toAddress       String
+  transactionHash String
+  timestamp       DateTime      @default(now())
+  agent           AgentMetadata @relation(fields: [agentAddress], references: [agentAddress])
+
+  @@index([agentAddress])
+  @@index([fromAddress])
+  @@index([toAddress])
+}
+
+model MetadataHistory {
+  id                  Int           @id @default(autoincrement())
+  agentAddress        String
+  previousName        String?
+  previousSymbol      String?
+  previousDescription String?
+  previousImageUrl    String?
+  previousExternalUrl String?
+  previousAttributes  Json?
+  updatedAt          DateTime      @default(now())
+  updatedBy          String
+  agent              AgentMetadata @relation(fields: [agentAddress], references: [agentAddress])
+
+  @@index([agentAddress])
+  @@index([updatedAt])
+}
+
+model TransferRequest {
+  id           Int      @id @default(autoincrement())
+  agentAddress String
+  fromAddress  String
+  toAddress    String
+  status       String   @default("PENDING") // PENDING, COMPLETED, CANCELLED
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([agentAddress])
+  @@index([status])
+}
+
+model VerificationHistory {
+  id            Int               @id @default(autoincrement())
+  agentAddress  String
+  status        VerificationStatus
+  reason        String?
+  verifiedBy    String
+  timestamp     DateTime          @default(now())
+  agent         AgentMetadata     @relation(fields: [agentAddress], references: [agentAddress])
+
+  @@index([agentAddress])
+  @@index([status])
+}
+
+model AgentAnalytics {
+  id                Int           @id @default(autoincrement())
+  agentAddress      String        @unique
+  totalTransfers    Int           @default(0)
+  totalInteractions Int           @default(0)
+  lastInteraction   DateTime?
+  dailyStats        Json?         // Store daily interaction statistics
+  weeklyStats       Json?         // Store weekly interaction statistics
+  monthlyStats      Json?         // Store monthly interaction statistics
+  agent             AgentMetadata @relation(fields: [agentAddress], references: [agentAddress])
+
+  @@index([agentAddress])
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}

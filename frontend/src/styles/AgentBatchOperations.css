@@ -1,0 +1,272 @@
+.agent-batch-operations {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 2rem;
+  backdrop-filter: blur(10px);
+  max-width: 1000px;
+  margin: 2rem auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.batch-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.batch-header h3 {
+  margin: 0;
+  color: #64ffda;
+}
+
+.close-button {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0.5rem;
+  line-height: 1;
+  border-radius: 4px;
+  transition: all 0.3s ease;
+}
+
+.close-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.batch-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.template-section {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1.5rem;
+}
+
+.template-section h4 {
+  margin: 0 0 1rem;
+  color: white;
+}
+
+.template-section p {
+  color: rgba(255, 255, 255, 0.9);
+  margin: 0 0 1rem;
+  line-height: 1.4;
+}
+
+.template-button {
+  padding: 0.75rem 1.5rem;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.template-button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.dropzone {
+  border: 2px dashed rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.dropzone.active {
+  border-color: #64ffda;
+  background: rgba(100, 255, 218, 0.1);
+}
+
+.dropzone p {
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0;
+}
+
+.validation-errors {
+  background: rgba(255, 23, 68, 0.1);
+  border-radius: 8px;
+  padding: 1.5rem;
+}
+
+.validation-errors h4 {
+  color: #ff1744;
+  margin: 0 0 1rem;
+}
+
+.validation-errors ul {
+  margin: 0;
+  padding-left: 1.5rem;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.validation-errors li {
+  margin-bottom: 0.5rem;
+}
+
+.agents-preview {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1.5rem;
+}
+
+.agents-preview h4 {
+  margin: 0 0 1rem;
+  color: white;
+}
+
+.agents-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1rem;
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.agent-preview {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  padding: 1rem;
+}
+
+.agent-preview h5 {
+  margin: 0 0 0.25rem;
+  color: white;
+}
+
+.agent-preview .symbol {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.9rem;
+  margin: 0 0 0.5rem;
+}
+
+.agent-preview .description {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.agent-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.category {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.price {
+  color: #64ffda;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.tag {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.functions-count {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.8rem;
+}
+
+.error-message {
+  background: rgba(255, 23, 68, 0.1);
+  color: #ff1744;
+  padding: 1rem;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.success-message {
+  background: rgba(0, 230, 118, 0.1);
+  color: #00e676;
+  padding: 1rem;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.progress-bar {
+  position: relative;
+  height: 40px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: #64ffda;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: white;
+  font-weight: 500;
+  z-index: 1;
+}
+
+.create-button {
+  width: 100%;
+  padding: 1rem;
+  background: #64ffda;
+  border: none;
+  border-radius: 4px;
+  color: #1a237e;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.create-button:hover:not(:disabled) {
+  background: #00bfa5;
+}
+
+.create-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 768px) {
+  .agents-list {
+    grid-template-columns: 1fr;
+  }
+}
